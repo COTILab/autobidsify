@@ -26,7 +26,7 @@ NIRS_NAME_HINTS = ("nirs", "fnirs", "nirx", "homER", "snirf")
 MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
 ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
 
-USER_TRIO = {"README.md", "participants.tsv", "dataset_description.json"}
+USER_TRIO = {"readme.md", "participants.tsv", "dataset_description.json"}
 
 def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
     """Return SHA1 of the first max_bytes of the file to fingerprint quickly."""

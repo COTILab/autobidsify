@@ -16,6 +16,50 @@ from utils import ensure_dir, copy_file, yellow, green
 
 USER_TRIO = {"readme.md", "participants.tsv", "dataset_description.json"}
 
+import yaml
+from typing import Dict, List, Set
+
+def _generate_tree_text(root: Path) -> str:
+    """Build a human-readable ASCII tree for the whole bids_out folder."""
+    root = Path(root)
+    lines: List[str] = [root.name + "/"]
+    def walk(d: Path, prefix: str = ""):
+        entries = sorted([p for p in d.iterdir()], key=lambda x: (not x.is_dir(), x.name.lower()))
+        for i, p in enumerate(entries):
+            is_last = (i == len(entries) - 1)
+            elbow = "└── " if is_last else "├── "
+            lines.append(prefix + elbow + p.name + ("/" if p.is_dir() else ""))
+            if p.is_dir():
+                extension = "    " if is_last else "│   "
+                walk(p, prefix + extension)
+    walk(root)
+    return "\n".join(lines)
+
+def _build_manifest(out_dir: Path) -> Dict:
+    """Collect every file path (relative to bids_out) and an ASCII tree."""
+    out_dir = Path(out_dir)
+    files = []
+    for p in out_dir.rglob("*"):
+        if p.is_file():
+            files.append(str(p.relative_to(out_dir)).replace("\\", "/"))
+    files.sort()
+    return {
+        "file_count": len(files),
+        "files": files,
+        "tree_text": _generate_tree_text(out_dir),
+    }
+
+def _write_yaml_with_manifest(original_yaml_text: str, manifest: Dict, out_dir: Path, out_name: str = "BIDSMap_with_manifest.yaml"):
+    """Merge manifest into YAML under the 'manifest' key and write a new YAML file."""
+    try:
+        y = yaml.safe_load(original_yaml_text) or {}
+    except Exception:
+        y = {}
+    y["manifest"] = manifest
+    dst = Path(out_dir) / out_name
+    dst.write_text(yaml.safe_dump(y, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return dst
+
 def list_all_files(root: Path) -> List[Path]:
     return [p for p in root.rglob("*") if p.is_file()]
 
@@ -55,12 +99,12 @@ def plan_mappings(in_dir: Path, bidsmap: dict) -> Dict[str, str]:
 def copy_user_trio(in_dir: Path, out_dir: Path):
     """Copy user-provided trio to BIDS root if present (do not overwrite if already exists)."""
     for name in USER_TRIO:
-        src = in_dir / name
-        if src.exists():
-            dst = out_dir / name
-            ensure_dir(dst.parent)
-            if not dst.exists():
-                copy_file(src, dst)
+        for f in in_dir.iterdir():
+            if f.is_file() and f.name.lower() == name:
+                dst = out_dir / name
+                ensure_dir(dst.parent)
+                if not dst.exists():
+                    copy_file(f, dst)
 
 def route_residuals(in_dir: Path, out_dir: Path, planned: Dict[str, str], bidsmap: dict):
     """
@@ -127,5 +171,11 @@ def execute_bidsmap(in_dir: Path, out_dir: Path, rules_text: str, dry_run: bool 
         "notes": "Demo executor; plug real conversions (e.g., DICOM->NIfTI via dcm2niix) as needed."
     }
     (out_dir / "conversion_log.json").write_text(json.dumps(log, indent=2), encoding="utf-8")
+
+    # 6) Build manifest and persist into a YAML alongside the original map
+    manifest = _build_manifest(out_dir)
+    _write_yaml_with_manifest(rules_text, manifest, out_dir)
+    print(green("[manifest] BIDSMap_with_manifest.yaml written with full file listing and tree."))
+
     print(green("[done] BIDS tree assembled; residual files are routed to derivatives/."))
 
