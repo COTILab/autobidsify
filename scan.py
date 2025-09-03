@@ -10,14 +10,23 @@ import csv
 import zipfile
 
 TEXT_EXT = {".txt", ".md", ".rtf", ".html", ".htm"}
-TABLE_EXT = {".csv", ".tsv"}
+TABLE_EXT = {".csv", ".tsv", "xlsx"}
 DOC_EXT = {".pdf", ".docx", ".pptx"}
 EEG_EXT = {".edf", ".bdf", ".vhdr", ".vmrk", ".eeg", ".set", ".fdt"}
-NIRS_EXT = {".snirf"}
 MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
 ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
 
-USER_TRIO = {"readme.md", "participants.tsv", "dataset_description.json"}
+# NIRS can appear in multiple vendor/proprietary formats
+# We include .nirs (vendor), .snirf (BIDS-preferred), .mat (common export), and plain tables.
+NIRS_EXT = {".snirf", ".nirs", ".mat"}  # extend later if needed
+
+# Keywords to heuristically classify ambiguous files (like CSV/TSV/TXT/MAT) as NIRS
+NIRS_NAME_HINTS = ("nirs", "fnirs", "nirx", "homER", "snirf")
+
+MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
+ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
+
+USER_TRIO = {"README.md", "participants.tsv", "dataset_description.json"}
 
 def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
     """Return SHA1 of the first max_bytes of the file to fingerprint quickly."""
@@ -52,20 +61,47 @@ def sample_table_head(p: Path, max_rows: int = 3):
         return {"rows": []}
 
 def detect_kind(p: Path) -> str:
-    """Coarse type based on extension; real parsing happens in executor or via tools."""
+    """Coarse type based on extension; add heuristics so NIRS is recognized even if CSV/MAT."""
     s = p.suffix.lower()
+    name_lower = p.name.lower()
+
+    # Trio at root
     if p.name.lower() in USER_TRIO:
         return "user_trio"
-    if p.name.lower().endswith(".nii.gz"):
+
+    # MRI
+    if p.name.lower().endswith(".nii.gz") or s in MRI_EXT:
         return "mri"
-    if s in MRI_EXT:
-        return "mri"
-    if s in NIRS_EXT: return "nirs"
-    if s in EEG_EXT: return "eeg"
-    if s in TABLE_EXT: return "table"
-    if s in TEXT_EXT: return "text"
-    if s in DOC_EXT: return "doc"
-    if s in ARCHIVE_EXT: return "archive"
+
+    # NIRS by explicit extension
+    if s in NIRS_EXT:
+        return "nirs"
+
+    # Heuristic: CSV/TSV/TXT/MAT with NIRS-ish names → classify as NIRS
+    if s in {".csv", ".tsv", ".txt", ".mat", "xlsx"}:
+        # check filename and parent folder names
+        parent_chain = [p.parent.name.lower()]
+        # also include grandparent one level up as a weak hint
+        if p.parent.parent and p.parent.parent != p.parent:
+            parent_chain.append(p.parent.parent.name.lower())
+        if any(h in name_lower for h in NIRS_NAME_HINTS) or any(
+            any(h in x for h in NIRS_NAME_HINTS) for x in parent_chain
+        ):
+            return "nirs"
+
+    # EEG
+    if s in EEG_EXT:
+        return "eeg"
+
+    # Tables & text (fallback)
+    if s in TABLE_EXT:
+        return "table"
+    if s in TEXT_EXT:
+        return "text"
+    if s in DOC_EXT:
+        return "doc"
+    if s in ARCHIVE_EXT:
+        return "archive"
     return "other"
 
 def list_archive(zip_path: Path, max_entries: int = 30):
