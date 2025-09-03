@@ -1,4 +1,4 @@
-# auto\_bidsify · 使用说明（README）
+# auto\_bidsify
 
 > 一句话目标：把**任意无序的文件夹或 .zip 压缩包**，自动整理成**最小 BIDS 主体**；
 > **仅**保留 BIDS 必需内容 +（如有）用户三件套 `README.md / participants.tsv / dataset_description.json` 在 BIDS 根，
