@@ -1,35 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 Lightweight scanner that walks the prepared input tree, samples representative files,
-and extracts just-enough metadata for LLM mapping. It does not convert data.
+and extracts just-enough metadata for LLM mapping. It also carries user hints
+such as the total number of subjects, and includes the full file list so LLM
+can cluster/assign subjects without regex.
 """
 from pathlib import Path
-import hashlib
-import json
-import csv
-import zipfile
+import hashlib, json, csv, zipfile
 
 TEXT_EXT = {".txt", ".md", ".rtf", ".html", ".htm"}
-TABLE_EXT = {".csv", ".tsv", "xlsx"}
+TABLE_EXT = {".csv", ".tsv", ".xlsx"}
 DOC_EXT = {".pdf", ".docx", ".pptx"}
 EEG_EXT = {".edf", ".bdf", ".vhdr", ".vmrk", ".eeg", ".set", ".fdt"}
 MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
 ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
 
-# NIRS can appear in multiple vendor/proprietary formats
-# We include .nirs (vendor), .snirf (BIDS-preferred), .mat (common export), and plain tables.
-NIRS_EXT = {".snirf", ".nirs", ".mat"}  # extend later if needed
-
-# Keywords to heuristically classify ambiguous files (like CSV/TSV/TXT/MAT) as NIRS
-NIRS_NAME_HINTS = ("nirs", "fnirs", "nirx", "homER", "snirf")
-
-MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
-ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
+# NIRS formats (extendable)
+NIRS_EXT = {".snirf", ".nirs", ".mat"}
+NIRS_NAME_HINTS = ("nirs", "fnirs", "nirx", "homer", "snirf")
 
 USER_TRIO = {"readme.md", "participants.tsv", "dataset_description.json"}
 
 def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
-    """Return SHA1 of the first max_bytes of the file to fingerprint quickly."""
     h = hashlib.sha1()
     try:
         with p.open("rb") as f:
@@ -39,7 +31,6 @@ def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
         return ""
 
 def sample_text_head(p: Path, max_chars: int = 600) -> str:
-    """Return the first few characters of a text-like file for summarization."""
     try:
         with p.open("r", encoding="utf-8", errors="ignore") as f:
             return f.read(max_chars)
@@ -47,7 +38,6 @@ def sample_text_head(p: Path, max_chars: int = 600) -> str:
         return ""
 
 def sample_table_head(p: Path, max_rows: int = 3):
-    """Return header and first few rows from CSV/TSV to infer columns."""
     try:
         dialect = csv.excel_tab if p.suffix.lower()==".tsv" else csv.excel
         with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
@@ -61,39 +51,24 @@ def sample_table_head(p: Path, max_rows: int = 3):
         return {"rows": []}
 
 def detect_kind(p: Path) -> str:
-    """Coarse type based on extension; add heuristics so NIRS is recognized even if CSV/MAT."""
     s = p.suffix.lower()
     name_lower = p.name.lower()
-
-    # Trio at root
     if p.name.lower() in USER_TRIO:
         return "user_trio"
-
-    # MRI
     if p.name.lower().endswith(".nii.gz") or s in MRI_EXT:
         return "mri"
-
-    # NIRS by explicit extension
     if s in NIRS_EXT:
         return "nirs"
-
-    # Heuristic: CSV/TSV/TXT/MAT with NIRS-ish names → classify as NIRS
-    if s in {".csv", ".tsv", ".txt", ".mat", "xlsx"}:
-        # check filename and parent folder names
+    if s in {".csv", ".tsv", ".txt", ".mat", ".xlsx"}:
         parent_chain = [p.parent.name.lower()]
-        # also include grandparent one level up as a weak hint
         if p.parent.parent and p.parent.parent != p.parent:
             parent_chain.append(p.parent.parent.name.lower())
         if any(h in name_lower for h in NIRS_NAME_HINTS) or any(
             any(h in x for h in NIRS_NAME_HINTS) for x in parent_chain
         ):
             return "nirs"
-
-    # EEG
     if s in EEG_EXT:
         return "eeg"
-
-    # Tables & text (fallback)
     if s in TABLE_EXT:
         return "table"
     if s in TEXT_EXT:
@@ -105,7 +80,6 @@ def detect_kind(p: Path) -> str:
     return "other"
 
 def list_archive(zip_path: Path, max_entries: int = 30):
-    """List a few entries inside a .zip archive without fully extracting."""
     meta = {"type":"zip","entries":[]}
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
@@ -115,8 +89,8 @@ def list_archive(zip_path: Path, max_entries: int = 30):
         pass
     return meta
 
-def scan_tree(root: Path, sample_per_ext: int = 5):
-    """Walk the tree and collect a compact 'evidence bundle' for the LLM."""
+def scan_tree(root: Path, sample_per_ext: int = 5, n_subjects: int = None):
+    """Collect a compact evidence bundle + a full file list and optional user hints."""
     root = Path(root)
     all_files = [p for p in root.rglob("*") if p.is_file()]
     by_ext = {}
@@ -126,7 +100,6 @@ def scan_tree(root: Path, sample_per_ext: int = 5):
             key = ".nii.gz"
         by_ext.setdefault(key, []).append(p)
 
-    # Representative samples per extension
     samples = []
     for ext, lst in by_ext.items():
         for p in lst[:sample_per_ext]:
@@ -145,7 +118,6 @@ def scan_tree(root: Path, sample_per_ext: int = 5):
                 entry["archive_listing"] = list_archive(p)
             samples.append(entry)
 
-    # User trio presence (at root)
     trio_found = {name: (root / name).exists() for name in USER_TRIO}
 
     bundle = {
@@ -153,7 +125,11 @@ def scan_tree(root: Path, sample_per_ext: int = 5):
         "counts": {ext: len(lst) for ext, lst in by_ext.items()},
         "samples": samples,
         "trio_found": trio_found,
+        # full file list for subject assignment by LLM
+        "all_files": [str(p.relative_to(root)).replace("\\","/") for p in all_files],
     }
+    if n_subjects is not None:
+        bundle["user_hints"] = {"n_subjects": int(n_subjects)}
     return bundle
 
 def save_evidence_bundle(bundle: dict, out_path: Path):

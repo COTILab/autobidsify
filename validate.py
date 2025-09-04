@@ -3,9 +3,7 @@
 Validator wrapper. If 'bids-validator' CLI exists, run it and return JSON.
 Otherwise, return a stub report so the pipeline keeps working offline.
 """
-import json
-import shutil
-import subprocess
+import json, shutil, subprocess
 from pathlib import Path
 
 def run_bids_validator(bids_root: Path) -> dict:
