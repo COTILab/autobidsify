@@ -1,4 +1,4 @@
-# auto\_bidsify · 全新版本 README（LLM 主导的 subject 分配 | 无正则）
+# auto\_bidsify
 
 > 目标：把**任意无序文件夹或 .zip** 自动整理为**最小可用的 BIDS 树**。
 >
@@ -51,7 +51,7 @@ auto_bidsify/
 
 ## 🚀 快速开始
 
-### 一键全流程（推荐）
+### 一键全流程
 
 ```bash
 python3 cli.py full \
@@ -61,7 +61,7 @@ python3 cli.py full \
   --nsubjects 18
 ```
 
-> 无法联网或没 Key？把 `--llm openai` 换为 `--llm stub`，也能跑通（按顺序把前 18 个 NIRS 文件分配给 sub-01..sub-18）。
+> 无法联网或没API Key？把 `--llm openai` 换为 `--llm stub`，也能跑通（按顺序把前 18 个 NIRS 文件分配给 sub-01..sub-18）。
 
 ### 分步执行（便于排查）
 
@@ -270,9 +270,4 @@ A：LLM 会根据**目录/批次/前缀**做聚类分配；从 stub 起步也能
 **Q：为什么把很多文件放进 `derivatives/`？**
 A：保持 BIDS 主体**最小**，便于校验与下游复用；原始与文档仍被完整保留在 `derivatives/`。
 
----
-
-## 📄 许可证
-
-示例代码用于研究/教学场景。感谢 BIDS 社区与 OpenAI SDK。
 
