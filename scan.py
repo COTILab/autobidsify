@@ -1,27 +1,46 @@
 # -*- coding: utf-8 -*-
 """
-Lightweight scanner that walks the prepared input tree, samples representative files,
-and extracts just-enough metadata for LLM mapping. It also carries user hints
-such as the total number of subjects, and includes the full file list so LLM
-can cluster/assign subjects without regex.
+Scan the prepared input tree and build an 'evidence bundle' for the LLM:
+- Full file list and extension counts
+- Light-weight content samples (text/CSV/JSON)
+- SNIRF/NIfTI/DICOM headers (metadata only; no pixels/voxels)
+- Trio presence and contents if already provided at root
+- User description text and required number of subjects
 """
 from pathlib import Path
-import hashlib, json, csv, zipfile
+from typing import Dict, List, Any
+import os, csv, json, hashlib
 
-TEXT_EXT = {".txt", ".md", ".rtf", ".html", ".htm"}
-TABLE_EXT = {".csv", ".tsv", ".xlsx"}
-DOC_EXT = {".pdf", ".docx", ".pptx"}
-EEG_EXT = {".edf", ".bdf", ".vhdr", ".vmrk", ".eeg", ".set", ".fdt"}
-MRI_EXT = {".nii", ".dcm"}  # .nii.gz handled specially
-ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
+from utils import read_text, write_text
 
-# NIRS formats (extendable)
-NIRS_EXT = {".snirf", ".nirs", ".mat"}
-NIRS_NAME_HINTS = ("nirs", "fnirs", "nirx", "homer", "snirf")
+# Optional heavy deps (fail-soft)
+try:
+    import h5py  # for SNIRF
+    _HAS_H5PY = True
+except Exception:
+    _HAS_H5PY = False
 
-USER_TRIO = {"readme.md", "participants.tsv", "dataset_description.json"}
+try:
+    import nibabel as nib  # for NIfTI
+    _HAS_NIB = True
+except Exception:
+    _HAS_NIB = False
 
-def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
+try:
+    import pydicom  # for DICOM
+    _HAS_PYDICOM = True
+except Exception:
+    _HAS_PYDICOM = False
+
+TEXT_EXT = {".txt", ".md", ".rtf", ".html", ".htm", ".log"}
+TABLE_EXT = {".csv", ".tsv", ".json", ".yaml", ".yml"}
+NIFTI_EXT = {".nii", ".nii.gz"}
+SNIRF_EXT = {".snirf"}
+DICOM_EXT = {".dcm"}  # note: some dicoms have no extension; we avoid deep sniffing for speed
+
+TRIO_CANON = {"readme.md", "participants.tsv", "dataset_description.json"}
+
+def _sha1_head(p: Path, max_bytes: int = 4096) -> str:
     h = hashlib.sha1()
     try:
         with p.open("rb") as f:
@@ -30,108 +49,172 @@ def file_hash_head(p: Path, max_bytes: int = 4096) -> str:
     except Exception:
         return ""
 
-def sample_text_head(p: Path, max_chars: int = 600) -> str:
-    try:
-        with p.open("r", encoding="utf-8", errors="ignore") as f:
-            return f.read(max_chars)
-    except Exception:
-        return ""
+def _sample_text(p: Path, max_chars: int = 2000) -> str:
+    return read_text(p, max_chars=max_chars)
 
-def sample_table_head(p: Path, max_rows: int = 3):
+def _sample_csv_tsv(p: Path, max_rows: int = 5) -> Dict[str, Any]:
+    info = {"path": str(p), "head": [], "dialect": "csv"}
     try:
-        dialect = csv.excel_tab if p.suffix.lower()==".tsv" else csv.excel
+        is_tsv = p.suffix.lower() == ".tsv"
+        dialect = csv.excel_tab if is_tsv else csv.excel
         with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-            reader = csv.reader(f, dialect=dialect)
-            rows = []
-            for i, row in enumerate(reader):
-                rows.append(row)
+            r = csv.reader(f, dialect=dialect)
+            for i, row in enumerate(r):
+                info["head"].append(row)
                 if i >= max_rows: break
-            return {"rows": rows}
-    except Exception:
-        return {"rows": []}
-
-def detect_kind(p: Path) -> str:
-    s = p.suffix.lower()
-    name_lower = p.name.lower()
-    if p.name.lower() in USER_TRIO:
-        return "user_trio"
-    if p.name.lower().endswith(".nii.gz") or s in MRI_EXT:
-        return "mri"
-    if s in NIRS_EXT:
-        return "nirs"
-    if s in {".csv", ".tsv", ".txt", ".mat", ".xlsx"}:
-        parent_chain = [p.parent.name.lower()]
-        if p.parent.parent and p.parent.parent != p.parent:
-            parent_chain.append(p.parent.parent.name.lower())
-        if any(h in name_lower for h in NIRS_NAME_HINTS) or any(
-            any(h in x for h in NIRS_NAME_HINTS) for x in parent_chain
-        ):
-            return "nirs"
-    if s in EEG_EXT:
-        return "eeg"
-    if s in TABLE_EXT:
-        return "table"
-    if s in TEXT_EXT:
-        return "text"
-    if s in DOC_EXT:
-        return "doc"
-    if s in ARCHIVE_EXT:
-        return "archive"
-    return "other"
-
-def list_archive(zip_path: Path, max_entries: int = 30):
-    meta = {"type":"zip","entries":[]}
-    try:
-        with zipfile.ZipFile(zip_path, "r") as z:
-            for i, info in enumerate(z.infolist()[:max_entries]):
-                meta["entries"].append({"name": info.filename, "size": info.file_size})
+        info["dialect"] = "tsv" if is_tsv else "csv"
     except Exception:
         pass
+    return info
+
+def _read_json_yaml_head(p: Path, max_chars: int = 4000) -> Dict[str, Any]:
+    # Just show prefix text; avoid parsing large files for robustness
+    return {"path": str(p), "text": read_text(p, max_chars=max_chars)}
+
+def _nifti_header(p: Path) -> Dict[str, Any]:
+    meta = {"path": str(p), "ok": False}
+    try:
+        if not _HAS_NIB:
+            meta["reason"] = "nibabel not installed"
+            return meta
+        img = nib.load(str(p))
+        hdr = img.header
+        meta.update({
+            "shape": tuple(int(x) for x in img.shape),
+            "zooms": tuple(float(x) for x in getattr(img, "header", {}).get_zooms()[:len(img.shape)]),
+            "datatype": int(hdr.get_data_dtype().num),
+            "descrip": str(hdr.get("descrip", b"")).strip(),
+        })
+        meta["ok"] = True
+    except Exception as e:
+        meta["reason"] = f"{type(e).__name__}: {e}"
     return meta
 
-def scan_tree(root: Path, sample_per_ext: int = 5, n_subjects: int = None):
-    """Collect a compact evidence bundle + a full file list and optional user hints."""
-    root = Path(root)
+def _snirf_header(p: Path) -> Dict[str, Any]:
+    meta = {"path": str(p), "ok": False}
+    try:
+        if not _HAS_H5PY:
+            meta["reason"] = "h5py not installed"
+            return meta
+        with h5py.File(str(p), "r") as f:
+            # Read a few common fields if present
+            meta["nirs_meta"] = {}
+            for key in ["metaDataTags", "nirs", "probe"]:
+                if key in f:
+                    meta["nirs_meta"][key] = list(f[key].keys()) if hasattr(f[key], "keys") else str(type(f[key]))
+            # Try typical subject ID locations
+            sid = None
+            try:
+                sid = f["nirs"]["metaDataTags"]["SubjectID"][()]
+                if isinstance(sid, bytes): sid = sid.decode("utf-8", "ignore")
+            except Exception:
+                pass
+            if sid: meta["subjectID"] = str(sid)
+            meta["ok"] = True
+    except Exception as e:
+        meta["reason"] = f"{type(e).__name__}: {e}"
+    return meta
+
+def _dicom_tags(p: Path) -> Dict[str, Any]:
+    meta = {"path": str(p), "ok": False}
+    try:
+        if not _HAS_PYDICOM:
+            meta["reason"] = "pydicom not installed"
+            return meta
+        ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
+        # Redact obvious PHI fields; include protocol/sequence hints
+        safe = {}
+        want = [
+            ("PatientID", "PatientID"),
+            ("StudyDescription", "StudyDescription"),
+            ("SeriesDescription", "SeriesDescription"),
+            ("ProtocolName", "ProtocolName"),
+            ("Manufacturer", "Manufacturer"),
+            ("Modality", "Modality"),
+            ("EchoTime", "EchoTime"),
+            ("RepetitionTime", "RepetitionTime"),
+            ("FlipAngle", "FlipAngle"),
+        ]
+        for tag_name, key in want:
+            val = getattr(ds, tag_name, None)
+            if val is not None:
+                safe[key] = str(val)
+        meta["tags"] = safe
+        meta["ok"] = True
+    except Exception as e:
+        meta["reason"] = f"{type(e).__name__}: {e}"
+    return meta
+
+def scan_tree(prepared_root: Path, user_text: str, n_subjects: int, sample_limit_per_ext: int = 6) -> Dict[str, Any]:
+    root = Path(prepared_root)
     all_files = [p for p in root.rglob("*") if p.is_file()]
-    by_ext = {}
+
+    counts = {}
+    by_ext: Dict[str, List[Path]] = {}
     for p in all_files:
-        key = p.suffix.lower()
+        ext = p.suffix.lower()
         if p.name.lower().endswith(".nii.gz"):
-            key = ".nii.gz"
-        by_ext.setdefault(key, []).append(p)
+            ext = ".nii.gz"
+        counts[ext] = counts.get(ext, 0) + 1
+        by_ext.setdefault(ext, []).append(p)
 
-    samples = []
-    for ext, lst in by_ext.items():
-        for p in lst[:sample_per_ext]:
-            entry = {
-                "relpath": str(p.relative_to(root)).replace("\\","/"),
-                "size": p.stat().st_size,
-                "suffix": ext,
-                "kind": detect_kind(p),
-                "sha1_head": file_hash_head(p),
-            }
-            if entry["kind"] == "text":
-                entry["text_head"] = sample_text_head(p)
-            if entry["kind"] == "table":
-                entry["table_head"] = sample_table_head(p)
-            if entry["kind"] == "archive" and p.suffix.lower()==".zip":
-                entry["archive_listing"] = list_archive(p)
-            samples.append(entry)
+    # Trio presence at ROOT (case-insensitive)
+    trio_found = {name: (root / name).exists() for name in TRIO_CANON}
 
-    trio_found = {name: (root / name).exists() for name in USER_TRIO}
+    samples: Dict[str, Any] = {
+        "text": [], "tables": [], "json_like": [],
+        "snirf_headers": [], "nifti_headers": [], "dicom_tags": []
+    }
+
+    # Collect light samples per extension
+    for ext, files in by_ext.items():
+        for p in files[:sample_limit_per_ext]:
+            low = ext.lower()
+            if low in TEXT_EXT:
+                samples["text"].append({"path": str(p.relative_to(root)), "snippet": _sample_text(p, 1500)})
+            elif low in {".csv", ".tsv"}:
+                info = _sample_csv_tsv(p)
+                info["path"] = str(p.relative_to(root))
+                samples["tables"].append(info)
+            elif low in {".json", ".yaml", ".yml", ".html", ".htm"}:
+                j = _read_json_yaml_head(p, max_chars=2000)
+                j["path"] = str(p.relative_to(root))
+                samples["json_like"].append(j)
+            elif low in SNIRF_EXT:
+                h = _snirf_header(p)
+                h["relpath"] = str(p.relative_to(root))
+                samples["snirf_headers"].append(h)
+            elif low in NIFTI_EXT:
+                h = _nifti_header(p)
+                h["relpath"] = str(p.relative_to(root))
+                samples["nifti_headers"].append(h)
+            elif low in DICOM_EXT:
+                h = _dicom_tags(p)
+                h["relpath"] = str(p.relative_to(root))
+                samples["dicom_tags"].append(h)
+            else:
+                # nothing for other binaries; we still keep counts
+                pass
+
+    # Read trio contents if present at root
+    trio_texts = {}
+    for name in TRIO_CANON:
+        p = root / name
+        if p.exists() and p.is_file():
+            trio_texts[name] = read_text(p, max_chars=10000)
 
     bundle = {
         "root": str(root),
-        "counts": {ext: len(lst) for ext, lst in by_ext.items()},
+        "all_files": [str(p.relative_to(root)).replace("\\", "/") for p in all_files],
+        "counts": counts,
         "samples": samples,
         "trio_found": trio_found,
-        # full file list for subject assignment by LLM
-        "all_files": [str(p.relative_to(root)).replace("\\","/") for p in all_files],
+        "trio_texts": trio_texts,
+        "user_hints": {"n_subjects": int(n_subjects)},
+        "user_text": str(user_text or "").strip(),
     }
-    if n_subjects is not None:
-        bundle["user_hints"] = {"n_subjects": int(n_subjects)}
     return bundle
 
 def save_evidence_bundle(bundle: dict, out_path: Path):
-    out_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_text(out_path, json.dumps(bundle, indent=2, ensure_ascii=False))
 
