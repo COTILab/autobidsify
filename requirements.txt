@@ -1,11 +1,6 @@
-# Python 3.9+ is recommended
-
-# OpenAI official Python SDK for the Responses API (ChatGPT models)
-openai>=1.0.0,<2.0.0
-
-# YAML read/write for BIDSMap.yaml
-PyYAML>=6.0,<7.0
-
-# Better ANSI colors on Windows terminals (optional; auto-skipped on non-Windows)
-colorama>=0.4.6; platform_system == "Windows"
+pyyaml
+openai
+h5py
+nibabel
+pydicom
 
