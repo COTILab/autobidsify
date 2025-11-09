@@ -1,0 +1,25 @@
+
+export OPENAI_API_KEY=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
+
+
+
+Full
+
+python cli.py full --input datasets/1-FRESH-Motor-snirf --output outputs/run2 --model gpt-4o --nsubjects 10 --modality nirs --describe "References, Appelhoff, S., Sanderson, M., Brooks, T., Vliet, M., Quentin, R., Holdgraf, C., Chaumon, M., Mikulan, E., Tavabi, K., Höchenberger, R., Welke, D., Brunner, C., Rockhill, A., Larson, E., Gramfort, A. and Jas, M. (2019). MNE-BIDS: Organizing electrophysiological data into the BIDS format and facilitating their analysis. Journal of Open Source Software 4: (1896). https://doi.org/10.21105/joss.01896, In preperation. Paper describes two datasets, but here we only one of them."
+
+
+
+
+Step-by-Step
+
+python cli.py ingest --input datasets/1-FRESH-Motor-snirf --output outputs/run1
+
+python cli.py evidence --output outputs/run1 --nsubjects 10 --modality nirs --describe "References, Appelhoff, S., Sanderson, M., Brooks, T., Vliet, M., Quentin, R., Holdgraf, C., Chaumon, M., Mikulan, E., Tavabi, K., Höchenberger, R., Welke, D., Brunner, C., Rockhill, A., Larson, E., Gramfort, A. and Jas, M. (2019). MNE-BIDS: Organizing electrophysiological data into the BIDS format and facilitating their analysis. Journal of Open Source Software 4: (1896). https://doi.org/10.21105/joss.01896, In preperation. Paper describes two datasets, but here we only one of them."
+
+python cli.py trio --output outputs/run1 --model gpt-4o --file readme
+
+python cli.py plan --output outputs/run1 --model gpt-4o
+
+python cli.py execute --output outputs/run1
+
+python cli.py validate --output outputs/run1
