@@ -1,8 +1,9 @@
 # evidence.py
-# Evidence bundle builder with automatic subject detection
+# Evidence bundle builder with automatic subject detection and intelligent pattern-based sampling
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set
+from collections import defaultdict
 from utils import list_all_files, write_json, sha1_head, warn, info, fatal, copy_file, read_json
 from constants import MAX_TEXT_SIZE, MAX_PDF_SIZE, MAX_DOCX_SIZE, MAX_PDF_PAGES
 import csv
@@ -300,60 +301,178 @@ def _auto_detect_subject_count(all_files: List[str], documents: List[Dict]) -> D
         "suggestion": "Please provide subject count using --nsubjects parameter"
     }
 
+def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]], 
+                                target_samples_per_ext: int = 5) -> tuple:
+    """
+    基于文件名模式的智能采样,保证覆盖所有命名规律。
+    
+    策略:
+    1. 提取文件名核心模式(去掉数字、括号等变化部分)
+    2. 按模式分组
+    3. 每个模式至少采样1个,按组大小分配采样配额
+    4. 不足时从大组补充
+    
+    Args:
+        files_by_ext: 按扩展名分组的文件字典 {".dcm": [Path, ...]}
+        target_samples_per_ext: 每个扩展名的目标采样数量
+    
+    Returns:
+        (sampled_files: List[Path], pattern_summary: Dict)
+    """
+    samples = []
+    pattern_summary = {}
+    
+    for ext, file_list in files_by_ext.items():
+        # 按模式分组
+        pattern_groups = defaultdict(list)
+        
+        for filepath in file_list:
+            filename = filepath.name
+            
+            # 提取核心模式:
+            # "VHMCT1mm-Hip (134).dcm" -> "VHMCTNmm-Hip"
+            # "subject_001_T1w.nii.gz" -> "subject_NNN_Tw"
+            pattern = re.sub(r'\s*\(\d+\)', '', filename)  # 去掉 (数字)
+            pattern = re.sub(r'\d+', 'N', pattern)  # 所有数字替换为 N
+            
+            pattern_groups[pattern].append(filepath)
+        
+        # 统计模式信息
+        n_patterns = len(pattern_groups)
+        samples_per_pattern = max(1, target_samples_per_ext // n_patterns) if n_patterns > 0 else target_samples_per_ext
+        
+        ext_samples = []
+        pattern_info = []
+        
+        # 从每个模式组采样
+        for pattern, files in sorted(pattern_groups.items()):
+            # 每个模式至少采样1个,最多采样 samples_per_pattern 个
+            n_samples = min(len(files), samples_per_pattern)
+            
+            # 使用前N个文件(保证稳定性和可重复性)
+            group_samples = files[:n_samples]
+            
+            ext_samples.extend(group_samples)
+            pattern_info.append({
+                "pattern": pattern,
+                "total_files": len(files),
+                "sampled": n_samples,
+                "example_files": [f.name for f in group_samples[:3]]  # 只记录前3个示例
+            })
+        
+        # 如果还没达到目标数量,从大组补充
+        if len(ext_samples) < target_samples_per_ext:
+            remaining = target_samples_per_ext - len(ext_samples)
+            
+            # 从文件数最多的组补充
+            large_groups = sorted(pattern_groups.items(), 
+                                key=lambda x: len(x[1]), 
+                                reverse=True)
+            
+            for pattern, files in large_groups:
+                if remaining <= 0:
+                    break
+                    
+                # 找出还未采样的文件
+                already_sampled = [f for f in ext_samples if f in files]
+                available = [f for f in files if f not in already_sampled]
+                
+                n_additional = min(remaining, len(available))
+                if n_additional > 0:
+                    ext_samples.extend(available[:n_additional])
+                    remaining -= n_additional
+                    
+                    # 更新对应 pattern 的统计信息
+                    for p_info in pattern_info:
+                        if p_info["pattern"] == pattern:
+                            p_info["sampled"] += n_additional
+                            break
+        
+        # 添加到总采样结果
+        samples.extend(ext_samples)
+        
+        # 记录该扩展名的采样摘要
+        pattern_summary[ext] = {
+            "total_patterns": n_patterns,
+            "total_files": len(file_list),
+            "sampled_files": len(ext_samples),
+            "patterns": pattern_info
+        }
+    
+    return samples, pattern_summary
+
 def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[int], 
                                      modality_hint: str, user_text: str,
                                      sample_per_ext: int = 5) -> Dict[str, Any]:
     """
     Build evidence bundle from actual data location.
     
+    使用智能采样策略,保证覆盖所有文件命名模式。
+    
     Args:
         data_root: Actual data directory (from ingest_info)
         user_n_subjects: User-provided subject count (can be None)
+        modality_hint: Modality hint from user
+        user_text: User description text
+        sample_per_ext: Target number of samples per file extension
     """
     root = Path(data_root)
     files = list_all_files(root)
     info(f"Scanning {len(files)} files in {root}")
 
+    # 按扩展名分组
     by_ext: Dict[str, List[Path]] = {}
     for p in files:
         key = ".nii.gz" if p.name.lower().endswith(".nii.gz") else p.suffix.lower()
         by_ext.setdefault(key, []).append(p)
 
+    # === 核心改进: 使用智能模式采样 ===
+    info("Using intelligent pattern-based sampling...")
+    sampled_files, pattern_summary = _intelligent_file_sampling(by_ext, sample_per_ext)
+    
+    # 显示采样统计
+    info("Sampling summary:")
+    for ext, summary in pattern_summary.items():
+        info(f"  {ext}: {summary['total_patterns']} unique patterns, "
+             f"sampled {summary['sampled_files']}/{summary['total_files']} files")
+    
+    # 处理采样的文件
     samples: List[Dict[str, Any]] = []
     documents: List[Dict[str, Any]] = []
     
-    for ext, lst in by_ext.items():
-        for p in lst[:sample_per_ext]:
-            entry = {
-                "relpath": str(p.relative_to(root)).replace("\\","/"),
-                "size": p.stat().st_size,
-                "suffix": ext,
-                "kind": detect_kind(p),
-                "sha1_head": sha1_head(p)
-            }
-            
-            kind = entry["kind"]
-            
-            if kind in {"text_doc", "document"}:
-                # info(f"Extracting document content: {p.name}")  # Commented out - too verbose
-                content = _extract_document_content(p)
-                if content:
-                    documents.append({
-                        "relpath": entry["relpath"],
-                        "filename": p.name,
-                        "type": ext,
-                        "size": entry["size"],
-                        "content": content,
-                        "purpose": "experimental_protocol_or_metadata"
-                    })
-                    entry["has_full_content"] = True
-                    entry["content_length"] = len(content)
-            elif kind == "table":
-                entry["table_head"] = _table_head(p)
-            
-            samples.append(entry)
+    for p in sampled_files:
+        ext = ".nii.gz" if p.name.lower().endswith(".nii.gz") else p.suffix.lower()
+        
+        entry = {
+            "relpath": str(p.relative_to(root)).replace("\\","/"),
+            "size": p.stat().st_size,
+            "suffix": ext,
+            "kind": detect_kind(p),
+            "sha1_head": sha1_head(p)
+        }
+        
+        kind = entry["kind"]
+        
+        # 提取文档内容
+        if kind in {"text_doc", "document"}:
+            content = _extract_document_content(p)
+            if content:
+                documents.append({
+                    "relpath": entry["relpath"],
+                    "filename": p.name,
+                    "type": ext,
+                    "size": entry["size"],
+                    "content": content,
+                    "purpose": "experimental_protocol_or_metadata"
+                })
+                entry["has_full_content"] = True
+                entry["content_length"] = len(content)
+        elif kind == "table":
+            entry["table_head"] = _table_head(p)
+        
+        samples.append(entry)
 
-    # Determine final subject count
+    # === Subject count detection ===
     final_count = None
     count_source = None
     subject_detection = None
@@ -387,7 +506,7 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
             info(f"✓ {subject_detection['evidence']}")
             info(f"  Average files per subject: {subject_detection.get('avg_files_per_subject', 'N/A')}")
         elif subject_detection["confidence"] == "medium":
-            info(f"◐ {subject_detection['evidence']}")
+            info(f"◉ {subject_detection['evidence']}")
         elif subject_detection["confidence"] == "low":
             warn(f"⚠ {subject_detection['evidence']}")
             if subject_detection.get("warning"):
@@ -409,6 +528,7 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
             final_count = 1  # Fallback
             count_source = "fallback"
 
+    # === Build bundle with pattern information ===
     bundle = {
         "root": str(root),
         "counts_by_ext": {ext: len(lst) for ext, lst in by_ext.items()},
@@ -430,12 +550,43 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
             "total_documents": len(documents),
             "document_types": list(set(d["type"] for d in documents)) if documents else [],
             "total_text_length": sum(len(d["content"]) for d in documents)
+        },
+        # === 新增: 采样策略信息 ===
+        "sampling_strategy": {
+            "method": "pattern_based",
+            "target_per_ext": sample_per_ext,
+            "total_patterns_detected": sum(s["total_patterns"] for s in pattern_summary.values()),
+            "pattern_summary": pattern_summary
         }
     }
     
     info(f"Extracted {len(documents)} documents")
     if documents:
         info(f"Total text: {bundle['document_summary']['total_text_length']} characters")
+    
+    # 显示采样策略摘要
+    info("\n=== Pattern-Based Sampling Summary ===")
+    total_patterns = sum(s['total_patterns'] for s in pattern_summary.values())
+    total_sampled = sum(s['sampled_files'] for s in pattern_summary.values())
+    total_files = sum(s['total_files'] for s in pattern_summary.values())
+    
+    info(f"Total unique patterns detected: {total_patterns}")
+    info(f"Total files sampled: {total_sampled}/{total_files}")
+    info("")
+    
+    for ext, summary in pattern_summary.items():
+        info(f"{ext}: {summary['total_patterns']} patterns, {summary['sampled_files']} files sampled")
+        
+        # 显示前3个模式作为示例
+        for i, p in enumerate(summary['patterns'][:3], 1):
+            info(f"  {i}. Pattern '{p['pattern']}': {p['sampled']}/{p['total_files']} files")
+            if p['example_files']:
+                info(f"     Examples: {', '.join(p['example_files'][:2])}")
+        
+        if len(summary['patterns']) > 3:
+            remaining = len(summary['patterns']) - 3
+            info(f"  ... and {remaining} more pattern(s)")
+        info("")
     
     return bundle
 
@@ -444,6 +595,7 @@ def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     Build evidence bundle using ingest_info to locate data.
     
     Auto-detects subject count if not provided.
+    Uses intelligent pattern-based sampling to ensure coverage.
     """
     output_dir = Path(output_dir)
     
@@ -485,7 +637,7 @@ def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     else:
         info("No existing trio files found in input data")
     
-    # Build evidence bundle with auto-detection
+    # Build evidence bundle with intelligent sampling
     bundle = _build_evidence_bundle_internal(
         data_root=data_root,
         user_n_subjects=user_hints.get("n_subjects"),  # Can be None
@@ -508,6 +660,8 @@ def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     info(f"Total files: {len(bundle['all_files'])}")
     info(f"File types: {len(bundle['counts_by_ext'])}")
     info(f"Documents extracted: {len(bundle['documents'])}")
+    info(f"Sampling method: {bundle['sampling_strategy']['method']}")
+    info(f"Patterns detected: {bundle['sampling_strategy']['total_patterns_detected']}")
     
     subject_det = bundle["subject_detection"]
     info(f"Subject count: {subject_det['final_count']} (source: {subject_det['count_source']})")

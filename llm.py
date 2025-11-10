@@ -182,12 +182,12 @@ Output JSON (ONLY valid JSON):
 
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MISSION: Design a complete BIDS conversion plan for ANY neuroimaging dataset
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CRITICAL YAML ESCAPING:
-- Use DOUBLE backslashes in regex: \\d \\w \\s (NOT \d \w \s)
+- Use DOUBLE backslashes in regex: \\\\d \\\\w \\\\s (NOT \\d \\w \\s)
 
 INPUT STRUCTURE:
 {
@@ -212,9 +212,9 @@ INPUT STRUCTURE:
   }
 }
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1: UNDERSTAND THE DATASET (Your primary responsibility!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Read user_context.description to extract:
 1. Subject count and identification method
@@ -241,9 +241,73 @@ Analyze all_files to validate and discover:
 - Detect file format (DICOM, NIfTI, CSV, etc.)
 - Identify modality types
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: BIDS-COMPLIANT MODALITY SUFFIXES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BIDS anatomical modality suffixes (MUST use these EXACT names):
+- T1w: T1-weighted MRI
+- T2w: T2-weighted MRI
+- T1rho: T1-rho MRI
+- T1map: Quantitative T1 map
+- T2map: Quantitative T2 map
+- T2star: T2* weighted MRI
+- FLAIR: Fluid attenuated inversion recovery
+- FLASH: Fast low angle shot MRI
+- PD: Proton density weighted MRI
+- PDmap: Quantitative PD map
+- PDT2: Combined PD/T2 weighted MRI
+- inplaneT1: T1 weighted in plane
+- inplaneT2: T2 weighted in plane
+- angio: Angiography (MR or CT)
+- defacemask: Defacing mask
+- SWImagandphase: Susceptibility weighted imaging
+
+CRITICAL CT SCAN HANDLING:
+❌ NEVER use these as modality suffix: CT, ct, CTscan, CT-scan, ctscan
+✓ For CT scans, ALWAYS use "T1w" as the modality suffix
+✓ Use acquisition label to specify it's CT data: acq-ct, acq-cthip, acq-ctchest
+
+Why T1w for CT? CT provides structural anatomy similar to T1-weighted MRI. BIDS does
+not have a dedicated CT suffix, so T1w is the appropriate choice for structural CT imaging.
+
+Examples of CORRECT CT naming:
+✓ sub-01_acq-ct_T1w.nii.gz              (general CT scan)
+✓ sub-01_acq-ctchest_T1w.nii.gz         (CT of chest)
+✓ sub-01_acq-cthead_T1w.nii.gz          (CT of head)
+✓ sub-02_acq-cthip_T1w.nii.gz           (CT of hip)
+✓ sub-03_acq-ctabdomen_T1w.nii.gz       (CT of abdomen)
+
+Examples of INCORRECT CT naming (DO NOT USE):
+❌ sub-01_CT.nii.gz                      (not BIDS compliant)
+❌ sub-01_acq-chest_CT.nii.gz            (CT suffix not allowed)
+❌ sub-01_ct.nii.gz                      (not valid)
+❌ sub-01_acq-hip_CTscan.nii.gz          (not BIDS compliant)
+
+How to detect CT scans:
+1. Look for "CT" in filename patterns (e.g., "VHMCT1mm-Hip")
+2. Check DICOM headers if available (Modality tag)
+3. Read user description for mentions of "CT scan", "computed tomography"
+4. File naming patterns like "*CT*", "*ct*" in original data
+
+When you encounter CT data:
+1. Detect it's CT from filename, description, or metadata
+2. Use acq-ct{bodypart} or acq-ct to preserve CT information
+3. ALWAYS use T1w as the modality suffix (never CT)
+4. Document in README that these are CT scans converted to T1w format
+
+Example transformation for CT data:
+Input:  "VHMCT1mm-Hip (134).dcm"  (CT scan of hip, detected from "CT" in name)
+Output: "sub-1_acq-cthip_T1w.nii.gz"  ✓ CORRECT (T1w suffix, ct in acquisition)
+NOT:    "sub-1_acq-hip_CT.nii.gz"     ❌ WRONG (CT suffix not allowed)
+
+Input:  "patient_001_chest_ct.dcm"
+Output: "sub-001_acq-ctchest_T1w.nii.gz"  ✓ CORRECT
+NOT:    "sub-001_acq-chest_CT.nii.gz"     ❌ WRONG
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2: DESIGN SUBJECT GROUPING STRATEGY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Choose the appropriate grouping method:
 
@@ -279,7 +343,7 @@ Output structure:
 ```yaml
 subject_grouping:
   method: directory_based
-  extraction_pattern: "([A-Za-z]+)_sub(\\d+)"
+  extraction_pattern: "([A-Za-z]+)_sub(\\\\d+)"
   subject_from_group: 2
   site_from_group: 1
 ```
@@ -292,21 +356,21 @@ Output structure:
 ```yaml
 subject_grouping:
   method: filename_pattern
-  extraction_regex: "patient_(\\d+)_.*"
+  extraction_regex: "patient_(\\\\d+)_.*"
   subject_from_group: 1
 ```
 
 METHOD 4: single_subject
 When: All files belong to one subject
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 3: DESIGN FILENAME TRANSFORMATION RULES  
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 For EACH unique filename pattern, create transformation rules.
 
 Analyze filenames to extract BIDS entities:
-- Modality type: CT, T1w, T2w, BOLD, DWI, etc.
+- Modality type: For CT use T1w, for MRI use T1w/T2w/BOLD/DWI/etc
 - Acquisition variants: body parts, protocols, contrasts
 - Run numbers: if multiple scans of same type
 - Session: if longitudinal data
@@ -316,32 +380,32 @@ BIDS entity patterns:
 - Functional: sub-{subject}_[ses-{session}_]task-{task}_[acq-{acq}_][run-{run}_]bold.nii.gz
 - Diffusion: sub-{subject}_[ses-{session}_][acq-{acq}_]dwi.nii.gz
 
-Example transformation design:
+Example transformation design for CT data:
 
 Input filename: VHMCT1mm-Hip (134).dcm
 Analysis:
   - VHM → subject 1 (from grouping rules)
-  - CT → modality type (use CT suffix for CT scans)
-  - Hip → body part → acq-hip
+  - CT → indicates CT scan → use T1w suffix (NOT CT suffix!)
+  - Hip → body part → acq-cthip (combine ct + bodypart in acquisition label)
   - (134) → slice number (ignore, dcm2niix will combine)
 
 Output design:
 ```yaml
 filename_rules:
-  - match_pattern: "VHM.*-Hip.*\\.dcm"
-    bids_template: "sub-1_acq-hip_CT.nii.gz"
+  - match_pattern: "VHM.*-Hip.*\\\\.dcm"
+    bids_template: "sub-1_acq-cthip_T1w.nii.gz"
     extract_entities:
       subject: "1"
-      acquisition: "hip"
-      modality_suffix: "CT"
+      acquisition: "cthip"
+      modality_suffix: "T1w"
 ```
 
 CRITICAL: Design rules for ALL observed patterns in all_files!
 Don't just handle examples - handle EVERY file.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 4: DETERMINE FILE FORMAT CONVERSIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Detect file format and set conversion needs:
 
@@ -369,9 +433,9 @@ format_ready: false
 convert_to: "csv_to_snirf"
 ```
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE OUTPUT 1: Visible Human (Prefix-based grouping with DICOM conversion)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE OUTPUT 1: Visible Human (Prefix-based grouping with DICOM→NIfTI conversion)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 subject_grouping:
   method: prefix_based
@@ -421,76 +485,66 @@ mappings:
     match: ["**/*.dcm"]
     format_ready: false
     convert_to: "dicom_to_nifti"
-    bids_out: "sub-{subject}/anat/sub-{subject}_acq-{bodypart}_CT.nii.gz"
+    bids_out: "sub-{subject}/anat/sub-{subject}_acq-{bodypart}_T1w.nii.gz"
     filename_rules:
-      - match_pattern: "VHM.*-Head.*\\.dcm"
-        bids_template: "sub-1_acq-head_CT.nii.gz"
+      - match_pattern: "VHM.*-Head.*\\\\.dcm"
+        bids_template: "sub-1_acq-cthead_T1w.nii.gz"
         extract_entities:
           subject: "1"
-          bodypart: "head"
-      - match_pattern: "VHM.*-Hip.*\\.dcm"
-        bids_template: "sub-1_acq-hip_CT.nii.gz"
+          acquisition: "cthead"
+      - match_pattern: "VHM.*-Hip.*\\\\.dcm"
+        bids_template: "sub-1_acq-cthip_T1w.nii.gz"
         extract_entities:
           subject: "1"
-          bodypart: "hip"
-      - match_pattern: "VHM.*-Shoulder.*\\.dcm"
-        bids_template: "sub-1_acq-shoulder_CT.nii.gz"
+          acquisition: "cthip"
+      - match_pattern: "VHM.*-Shoulder.*\\\\.dcm"
+        bids_template: "sub-1_acq-ctshoulder_T1w.nii.gz"
         extract_entities:
           subject: "1"
-          bodypart: "shoulder"
-      - match_pattern: "VHM.*-Knee.*\\.dcm"
-        bids_template: "sub-1_acq-knee_CT.nii.gz"
+          acquisition: "ctshoulder"
+      - match_pattern: "VHM.*-Pelvis.*\\\\.dcm"
+        bids_template: "sub-1_acq-ctpelvis_T1w.nii.gz"
         extract_entities:
           subject: "1"
-          bodypart: "knee"
-      - match_pattern: "VHM.*-Ankle.*\\.dcm"
-        bids_template: "sub-1_acq-ankle_CT.nii.gz"
-        extract_entities:
-          subject: "1"
-          bodypart: "ankle"
-      - match_pattern: "VHM.*-Pelvis.*\\.dcm"
-        bids_template: "sub-1_acq-pelvis_CT.nii.gz"
-        extract_entities:
-          subject: "1"
-          bodypart: "pelvis"
-      - match_pattern: "VHF.*-Head.*\\.dcm"
-        bids_template: "sub-2_acq-head_CT.nii.gz"
+          acquisition: "ctpelvis"
+      - match_pattern: "VHF.*-Head.*\\\\.dcm"
+        bids_template: "sub-2_acq-cthead_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "head"
-      - match_pattern: "VHF.*-Hip.*\\.dcm"
-        bids_template: "sub-2_acq-hip_CT.nii.gz"
+          acquisition: "cthead"
+      - match_pattern: "VHF.*-Hip.*\\\\.dcm"
+        bids_template: "sub-2_acq-cthip_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "hip"
-      - match_pattern: "VHF.*-Shoulder.*\\.dcm"
-        bids_template: "sub-2_acq-shoulder_CT.nii.gz"
+          acquisition: "cthip"
+      - match_pattern: "VHF.*-Shoulder.*\\\\.dcm"
+        bids_template: "sub-2_acq-ctshoulder_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "shoulder"
-      - match_pattern: "VHF.*-Knee.*\\.dcm"
-        bids_template: "sub-2_acq-knee_CT.nii.gz"
+          acquisition: "ctshoulder"
+      - match_pattern: "VHF.*-Knee.*\\\\.dcm"
+        bids_template: "sub-2_acq-ctknee_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "knee"
-      - match_pattern: "VHF.*-Ankle.*\\.dcm"
-        bids_template: "sub-2_acq-ankle_CT.nii.gz"
+          acquisition: "ctknee"
+      - match_pattern: "VHF.*-Ankle.*\\\\.dcm"
+        bids_template: "sub-2_acq-ctankle_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "ankle"
-      - match_pattern: "VHF.*-Pelvis.*\\.dcm"
-        bids_template: "sub-2_acq-pelvis_CT.nii.gz"
+          acquisition: "ctankle"
+      - match_pattern: "VHF.*-Pelvis.*\\\\.dcm"
+        bids_template: "sub-2_acq-ctpelvis_T1w.nii.gz"
         extract_entities:
           subject: "2"
-          bodypart: "pelvis"
+          acquisition: "ctpelvis"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLE OUTPUT 2: Multi-site Study (Directory-based grouping with NIfTI)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 subject_grouping:
   method: directory_based
-  extraction_pattern: "([A-Za-z]+)_sub(\\d+)"
+  extraction_pattern: "([A-Za-z]+)_sub(\\\\d+)"
   subject_from_group: 2
   site_from_group: 1
   
@@ -527,13 +581,13 @@ mappings:
       - match_pattern: ".*mprage.*"
         bids_template: "sub-{subject}_T1w.nii.gz"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLE OUTPUT 3: Standard BIDS (Already compliant, no changes needed)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 subject_grouping:
   method: directory_based
-  extraction_pattern: "sub-(\\d+)"
+  extraction_pattern: "sub-(\\\\d+)"
   subject_from_group: 1
 
 standardization:
@@ -550,22 +604,24 @@ mappings:
     convert_to: none
     filename_rules: []  # Keep original names
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL INSTRUCTIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. READ user_context.description FIRST - it's your primary guide
 2. ANALYZE all_files to validate and discover patterns
 3. DO NOT assume standard BIDS patterns - every dataset is unique
 4. EXTRACT participant metadata from description (sex, age, group, site, etc.)
 5. DESIGN filename_rules that handle ALL files (not just examples)
-6. For unusual datasets, BE CREATIVE in grouping strategy
-7. If you cannot determine something, add a BLOCKING question
+6. For CT scans: ALWAYS use T1w suffix, NEVER use CT suffix
+7. For unusual datasets, BE CREATIVE in grouping strategy
+8. If you cannot determine something, add a BLOCKING question
 
 ENTITY EXTRACTION KEYWORDS (use these to analyze filenames):
 
-Anatomical modalities:
-- CT, T1w, T2w, FLAIR, PD, angio
+Anatomical modalities (use EXACT BIDS suffix):
+- T1w, T2w, FLAIR, PD, angio (NEVER: CT, ct, CTscan)
+- For CT scans: ALWAYS use T1w suffix with acq-ct* label
 
 Functional:
 - BOLD, rest, task, fMRI
@@ -575,6 +631,7 @@ Diffusion:
 
 Acquisition variants (map to acq-{variant}):
 - Body parts: head, hip, shoulder, knee, ankle, pelvis, chest, abdomen
+- For CT body parts: cthead, cthip, ctshoulder, ctknee, etc.
 - Protocols: anonymized, skullstripped, normalized
 - Contrasts: gad, contrast
 - Sequences: mprage, space, spgr, epi
@@ -587,6 +644,7 @@ REMEMBER:
 - Python will execute YOUR decisions exactly as specified
 - The goal is a valid BIDS dataset that preserves all information
 - Every dataset is unique - design rules that fit THIS dataset
+- CT scans MUST use T1w suffix, not CT
 
 OUTPUT: Raw YAML only (no markdown fences, no extra text before or after)
 """

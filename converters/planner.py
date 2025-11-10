@@ -105,6 +105,99 @@ def _extract_python_observations(all_files: List[str]) -> Dict[str, Any]:
     
     return observations
 
+def _create_participants_json(metadata: Dict, out_dir: Path) -> None:
+    """
+    Create participants.json to describe custom columns in participants.tsv.
+    
+    This resolves BIDS validator warning about custom columns.
+    
+    Args:
+        metadata: Dict[subject_id, Dict[column, value]]
+        out_dir: Output directory
+    """
+    json_path = out_dir / "participants.json"
+    
+    if json_path.exists():
+        info(f"✓ participants.json already exists, preserving")
+        return
+    
+    # Collect all column names and their possible values
+    all_columns = {}
+    
+    for subj_meta in metadata.values():
+        for col, value in subj_meta.items():
+            if col not in all_columns:
+                all_columns[col] = {"values": set(), "types": set()}
+            
+            all_columns[col]["values"].add(str(value))
+            all_columns[col]["types"].add(type(value).__name__)
+    
+    # Build data dictionary
+    data_dict = {}
+    
+    for col, info_dict in all_columns.items():
+        values = sorted(list(info_dict["values"]))
+        
+        # Determine description and levels based on column name
+        if col == "sex":
+            data_dict[col] = {
+                "Description": "Biological sex of the participant",
+                "Levels": {
+                    "M": "Male",
+                    "F": "Female",
+                    "n/a": "Not available"
+                }
+            }
+        elif col == "age":
+            data_dict[col] = {
+                "Description": "Age of the participant",
+                "Units": "years"
+            }
+        elif col == "group":
+            levels = {v: v.capitalize() for v in values if v != "n/a"}
+            levels["n/a"] = "Not available"
+            data_dict[col] = {
+                "Description": "Experimental group or classification",
+                "Levels": levels
+            }
+        elif col == "site":
+            levels = {v: f"Data collection site: {v}" for v in values if v != "n/a"}
+            levels["n/a"] = "Not available"
+            data_dict[col] = {
+                "Description": "Site where data was collected",
+                "Levels": levels
+            }
+        elif col == "handedness":
+            data_dict[col] = {
+                "Description": "Handedness of the participant",
+                "Levels": {
+                    "L": "Left",
+                    "R": "Right",
+                    "A": "Ambidextrous",
+                    "n/a": "Not available"
+                }
+            }
+        else:
+            # Generic column
+            if len(values) <= 10:
+                # Few values - probably categorical
+                levels = {v: v for v in values if v != "n/a"}
+                levels["n/a"] = "Not available"
+                data_dict[col] = {
+                    "Description": f"Participant {col}",
+                    "Levels": levels
+                }
+            else:
+                # Many values - continuous or identifier
+                data_dict[col] = {
+                    "Description": f"Participant {col}"
+                }
+    
+    # Write JSON
+    write_json(json_path, data_dict)
+    info(f"✓ Created participants.json")
+    info(f"  Described columns: {', '.join(data_dict.keys())}")
+
 def build_bids_plan(model: str, planning_inputs: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     info("Generating BIDS Plan (LLM-First architecture)...")
     
@@ -378,6 +471,9 @@ def _create_participants_with_llm_metadata(subject_info: Dict, metadata: Dict, o
     
     info(f"✓ Created participants.tsv ({len(subject_records)} subjects)")
     info(f"  Columns: {', '.join(columns)}")
+    
+    # === 新增: 自动生成 participants.json ===
+    _create_participants_json(metadata, out_dir)
 
 def _create_simple_participants_tsv(subject_info: Dict, out_dir: Path) -> None:
     """Create simple participants.tsv with only participant_id."""
