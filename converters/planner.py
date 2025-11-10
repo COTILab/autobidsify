@@ -1,136 +1,32 @@
-# planner.py
-# LLM-First architecture: LLM makes ALL decisions, Python only executes
+# planner.py v2
+# LLM-First with Python enhancement - uses universal_core analysis
 
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import json
 import yaml
-import re
 from datetime import datetime
 from utils import write_json, read_json, write_yaml, info, warn, fatal, write_text
-from constants import HEADERS_DRAFT, HEADERS_NORMALIZED, VOXEL_DRAFT, VOXEL_FINAL_PLAN, BIDS_PLAN, SEVERITY_BLOCK
-from llm import llm_nirs_draft, llm_nirs_normalize, llm_mri_voxel_draft, llm_mri_voxel_final, llm_bids_plan
-
-def fix_yaml_regex_escapes(yaml_text: str) -> str:
-    """Fix regex escape sequences for YAML compatibility."""
-    lines = yaml_text.split('\n')
-    fixed_lines = []
-    
-    for line in lines:
-        if ('pattern:' in line or 'match_pattern:' in line or 'extraction_pattern:' in line) and ('"' in line or "'" in line):
-            if '"' in line:
-                parts = line.split('"')
-                if len(parts) >= 3:
-                    pattern_value = parts[1]
-                    fixed_pattern = pattern_value.replace('\\', '\\\\')
-                    line = parts[0] + '"' + fixed_pattern + '"' + '"'.join(parts[2:])
-            elif "'" in line:
-                parts = line.split("'")
-                if len(parts) >= 3:
-                    pattern_value = parts[1]
-                    fixed_pattern = pattern_value.replace('\\', '\\\\')
-                    line = parts[0] + "'" + fixed_pattern + "'" + "'".join(parts[2:])
-        fixed_lines.append(line)
-    
-    return '\n'.join(fixed_lines)
-
-def _parse_llm_json_response(response_text: str, step_name: str) -> Optional[Dict[str, Any]]:
-    if not response_text or not response_text.strip():
-        warn(f"{step_name}: LLM returned empty response")
-        return None
-    
-    text = response_text.strip()
-    
-    if text.startswith("```json"):
-        text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    elif text.startswith("```"):
-        lines = text.split('\n')
-        text = '\n'.join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        if "Extra data" in str(e):
-            try:
-                decoder = json.JSONDecoder()
-                obj, idx = decoder.raw_decode(text)
-                return obj
-            except:
-                pass
-        warn(f"{step_name}: Failed to parse JSON: {e}")
-        warn(f"Preview: {text[:500]}...")
-        return None
-
-def _extract_python_observations(all_files: List[str]) -> Dict[str, Any]:
-    """
-    Python observes patterns WITHOUT making decisions.
-    Just notes what it sees - LLM will interpret.
-    """
-    observations = {
-        "unique_prefixes": set(),
-        "unique_keywords": set(),
-        "directory_structure": "flat",
-        "patterns_noticed": []
-    }
-    
-    # Collect prefixes (first few chars before special chars)
-    for filepath in all_files[:min(100, len(all_files))]:
-        filename = filepath.split('/')[-1]
-        
-        # Extract prefix (alphanumeric before special char)
-        match = re.match(r'([A-Za-z]+)', filename)
-        if match:
-            prefix = match.group(1)[:5]  # First 5 chars max
-            observations["unique_prefixes"].add(prefix)
-        
-        # Extract keywords (capitalized words)
-        words = re.findall(r'[A-Z][a-z]+', filename)
-        observations["unique_keywords"].update(words[:3])
-    
-    # Check directory structure
-    has_dirs = any('/' in f for f in all_files)
-    if has_dirs:
-        max_depth = max(len(f.split('/')) for f in all_files)
-        observations["directory_structure"] = f"hierarchical (max depth: {max_depth})"
-    
-    # Convert sets to lists for JSON serialization
-    observations["unique_prefixes"] = sorted(list(observations["unique_prefixes"]))[:20]
-    observations["unique_keywords"] = sorted(list(observations["unique_keywords"]))[:20]
-    
-    return observations
+from constants import BIDS_PLAN
+from llm import llm_bids_plan
+from universal_core import extract_subject_ids_from_paths
 
 def _create_participants_json(metadata: Dict, out_dir: Path) -> None:
-    """
-    Create participants.json to describe custom columns in participants.tsv.
-    
-    This resolves BIDS validator warning about custom columns.
-    
-    Args:
-        metadata: Dict[subject_id, Dict[column, value]]
-        out_dir: Output directory
-    """
+    """Generate participants.json to describe custom columns"""
     json_path = out_dir / "participants.json"
     
     if json_path.exists():
-        info(f"✓ participants.json already exists, preserving")
+        info(f"✓ participants.json already exists")
         return
     
-    # Collect all column names and their possible values
+    # Collect all columns and values
     all_columns = {}
     
     for subj_meta in metadata.values():
         for col, value in subj_meta.items():
             if col not in all_columns:
-                all_columns[col] = {"values": set(), "types": set()}
-            
+                all_columns[col] = {"values": set()}
             all_columns[col]["values"].add(str(value))
-            all_columns[col]["types"].add(type(value).__name__)
     
     # Build data dictionary
     data_dict = {}
@@ -138,147 +34,104 @@ def _create_participants_json(metadata: Dict, out_dir: Path) -> None:
     for col, info_dict in all_columns.items():
         values = sorted(list(info_dict["values"]))
         
-        # Determine description and levels based on column name
         if col == "sex":
             data_dict[col] = {
                 "Description": "Biological sex of the participant",
-                "Levels": {
-                    "M": "Male",
-                    "F": "Female",
-                    "n/a": "Not available"
-                }
+                "Levels": {"M": "Male", "F": "Female", "n/a": "Not available"}
             }
         elif col == "age":
-            data_dict[col] = {
-                "Description": "Age of the participant",
-                "Units": "years"
-            }
+            data_dict[col] = {"Description": "Age of the participant", "Units": "years"}
         elif col == "group":
             levels = {v: v.capitalize() for v in values if v != "n/a"}
             levels["n/a"] = "Not available"
-            data_dict[col] = {
-                "Description": "Experimental group or classification",
-                "Levels": levels
-            }
+            data_dict[col] = {"Description": "Experimental group", "Levels": levels}
         elif col == "site":
             levels = {v: f"Data collection site: {v}" for v in values if v != "n/a"}
             levels["n/a"] = "Not available"
-            data_dict[col] = {
-                "Description": "Site where data was collected",
-                "Levels": levels
-            }
-        elif col == "handedness":
-            data_dict[col] = {
-                "Description": "Handedness of the participant",
-                "Levels": {
-                    "L": "Left",
-                    "R": "Right",
-                    "A": "Ambidextrous",
-                    "n/a": "Not available"
-                }
-            }
+            data_dict[col] = {"Description": "Data collection site", "Levels": levels}
         else:
-            # Generic column
             if len(values) <= 10:
-                # Few values - probably categorical
                 levels = {v: v for v in values if v != "n/a"}
                 levels["n/a"] = "Not available"
-                data_dict[col] = {
-                    "Description": f"Participant {col}",
-                    "Levels": levels
-                }
+                data_dict[col] = {"Description": f"Participant {col}", "Levels": levels}
             else:
-                # Many values - continuous or identifier
-                data_dict[col] = {
-                    "Description": f"Participant {col}"
-                }
+                data_dict[col] = {"Description": f"Participant {col}"}
     
-    # Write JSON
     write_json(json_path, data_dict)
     info(f"✓ Created participants.json")
-    info(f"  Described columns: {', '.join(data_dict.keys())}")
 
 def build_bids_plan(model: str, planning_inputs: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
-    info("Generating BIDS Plan (LLM-First architecture)...")
+    """
+    Build BIDS plan - v2 simplified, relies on evidence analysis.
+    
+    Key changes:
+    1. Uses structure_analysis from evidence bundle
+    2. Builds compressed payload for LLM
+    3. Python enhances LLM's plan with full file analysis
+    4. Subject detection uses evidence's result directly
+    """
+    info("Generating BIDS Plan (v2: LLM strategy + Python execution)...")
     
     planning_inputs["timestamp"] = datetime.now().isoformat()
     evidence_bundle = planning_inputs.get("evidence_bundle", {})
+    
+    # Extract key information
     all_files = evidence_bundle.get("all_files", [])
+    structure_analysis = evidence_bundle.get("structure_analysis", {})
     user_text = evidence_bundle.get("user_hints", {}).get("user_text", "")
     user_n_subjects = evidence_bundle.get("user_hints", {}).get("n_subjects")
     
-    # Python observations (NOT decisions!)
-    python_obs = _extract_python_observations(all_files)
+    subject_detection = structure_analysis.get("subject_detection", {})
+    tree_summary = structure_analysis.get("tree_summary_for_llm", {})
     
-    info(f"Dataset scan: {len(all_files)} files")
-    if python_obs['unique_prefixes']:
-        info(f"  Python noticed prefixes: {python_obs['unique_prefixes'][:5]}")
-    if python_obs['unique_keywords']:
-        info(f"  Python noticed keywords: {python_obs['unique_keywords'][:5]}")
+    info(f"Dataset: {len(all_files)} files")
+    info(f"Structure: {structure_analysis.get('directory_structure', {}).get('structure_template', 'unknown')}")
     
-    # Determine how many files to send based on dataset size
-    if len(all_files) <= 100:
-        file_list_for_llm = all_files
-        info(f"Small dataset: sending all {len(all_files)} files to LLM")
-    elif len(all_files) <= 3000:
-        file_list_for_llm = all_files
-        info(f"Medium dataset: sending all {len(all_files)} files to LLM for complete analysis")
-    else:
-        # Strategic sampling for very large datasets
-        sample_files = []
-        sample_files.extend(all_files[:100])
-        step = max(1, len(all_files) // 200)
-        for i in range(100, len(all_files) - 100, step):
-            sample_files.append(all_files[i])
-            if len(sample_files) >= 300:
-                break
-        sample_files.extend(all_files[-100:])
-        file_list_for_llm = sample_files
-        info(f"Large dataset: sending {len(file_list_for_llm)} representative files to LLM")
+    # === Build Optimized LLM Payload ===
+    # Strategy: Send compressed structure, not full file list
     
-    # Build LLM-friendly payload
     llm_payload = {
-        "file_structure": {
-            "all_files": file_list_for_llm,
-            "total_files": len(all_files),
-            "counts_by_ext": evidence_bundle.get("counts_by_ext", {})
-        },
+        "structure_summary": tree_summary,  # Compressed! Only 50 subjects
+        "total_files": len(all_files),
+        "total_subjects": subject_detection.get("best_candidate", {}).get("count", user_n_subjects),
+        "subject_pattern": subject_detection.get("best_candidate", {}).get("pattern_display", "unknown"),
+        "directory_template": structure_analysis.get("directory_structure", {}).get("structure_template"),
+        "sample_files": all_files[:50] + all_files[-50:],  # First and last 50
         "user_context": {
-            "description": user_text if user_text else "No user description provided",
+            "description": user_text,
             "n_subjects_hint": user_n_subjects,
             "modality_hint": evidence_bundle.get("user_hints", {}).get("modality_hint")
         },
         "documents": evidence_bundle.get("documents", []),
-        "python_observations": python_obs
+        "file_counts": evidence_bundle.get("counts_by_ext", {})
     }
     
     payload_json = json.dumps(llm_payload, ensure_ascii=False)
     payload_size = len(payload_json)
-    info(f"Payload size: {payload_size:,} characters")
+    estimated_tokens = payload_size // 4
     
-    if user_text:
-        info(f"✓ User description: {len(user_text)} chars")
+    info(f"Payload size: {payload_size:,} characters (~{estimated_tokens:,} tokens)")
     
-    # Call LLM (IT makes all decisions!)
+    if estimated_tokens > 25000:
+        warn(f"⚠ Payload approaching token limit, results may be slower")
+    
+    # === Call LLM ===
     try:
         response_text = llm_bids_plan(model, payload_json)
         
+        # Clean response
         text = response_text.strip()
-        if text.startswith("```yaml") or text.startswith("```yml") or text.startswith("```"):
+        if text.startswith("```"):
             lines = text.split("\n")
-            text = "\n".join(lines[1:])
+            text = "\n".join(lines[1:]) if len(lines) > 1 else text
         if text.endswith("```"):
             text = text[:-3]
         text = text.strip()
-        
-        # Fix regex escapes for YAML
-        text = fix_yaml_regex_escapes(text)
         
         plan = yaml.safe_load(text)
         
     except yaml.YAMLError as e:
         fatal(f"YAML parsing failed: {e}")
-        fatal("LLM returned invalid YAML format")
         return {"status": "error"}
     except Exception as e:
         fatal(f"BIDS plan generation failed: {e}")
@@ -286,164 +139,133 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any], out_dir: Path) 
         traceback.print_exc()
         return {"status": "error"}
     
-    # Validate LLM output
     if not plan.get("subjects"):
-        warn("WARNING: No subjects defined in plan")
-        return {"status": "error", "message": "Invalid plan structure"}
+        warn("WARNING: No subjects in plan")
+        return {"status": "error"}
     
-    info(f"✓ LLM generated plan for {len(plan.get('subjects', {}).get('labels', []))} subjects")
+    info(f"✓ LLM generated strategy for {len(plan.get('subjects', {}).get('labels', []))} subjects")
     
-    # Execute LLM's grouping strategy
-    subject_info = _execute_llm_grouping_strategy(all_files, plan, evidence_bundle)
+    # === CRITICAL: Python Enhances Plan with Full Analysis ===
+    # Don't rely on LLM's subject detection - use evidence's result!
     
-    # Create participants.tsv based on LLM's metadata
+    subject_info = _build_subject_records_from_evidence(
+        all_files=all_files,
+        structure_analysis=structure_analysis,
+        llm_plan=plan
+    )
+    
+    info(f"✓ Python enhanced: {subject_info['subject_count']} subjects confirmed")
+    
+    # === Generate participants.tsv ===
     participant_metadata = plan.get("participant_metadata", {})
-    if participant_metadata:
-        _create_participants_with_llm_metadata(subject_info, participant_metadata, out_dir)
-    elif subject_info.get("subject_records"):
-        _create_simple_participants_tsv(subject_info, out_dir)
     
-    # Add fingerprints
+    if subject_info["subject_count"] > 0:
+        if participant_metadata:
+            _create_participants_with_metadata(subject_info, participant_metadata, out_dir)
+        else:
+            _create_simple_participants_tsv(subject_info, out_dir)
+    else:
+        warn("⚠ No subjects detected, skipping participants.tsv")
+    
+    # === Save Outputs ===
     from utils import sha256_full
     plan["fingerprints"] = {
         "evidence_bundle_sha": sha256_full(json.dumps(evidence_bundle.get("counts_by_ext", {}), sort_keys=True)),
         "timestamp": planning_inputs["timestamp"]
     }
     
-    # Save outputs
     write_json(Path(out_dir) / "_staging" / "subject_analysis.json", subject_info)
     write_yaml(Path(out_dir) / "_staging" / "BIDSPlan.yaml", plan)
     
-    if subject_info.get("subject_count", 0) > 0:
-        info(f"✓ Analysis: {subject_info['subject_count']} subjects")
     info(f"✓ BIDS Plan saved")
     
     return {"status": "ok", "plan": plan}
 
-def _execute_llm_grouping_strategy(all_files: List[str], plan: Dict[str, Any], evidence: Dict) -> Dict[str, Any]:
+def _build_subject_records_from_evidence(all_files: List[str], structure_analysis: Dict, 
+                                         llm_plan: Dict) -> Dict[str, Any]:
     """
-    Execute LLM's subject grouping strategy.
-    Python just follows LLM's instructions.
-    """
-    grouping = plan.get("subject_grouping", {})
-    method = grouping.get("method")
+    Build subject records using evidence's analysis (NOT LLM's!)
     
-    subject_records = []
-    
-    if method == "prefix_based":
-        # LLM provided prefix-to-subject mapping
-        rules = grouping.get("rules", [])
-        
-        for rule in rules:
-            subject_id = rule.get("maps_to_subject")
-            prefix = rule.get("prefix")
-            metadata = rule.get("metadata", {})
-            
-            subject_records.append({
-                "numeric_id": subject_id,
-                "original_id": prefix,
-                "prefix": prefix,
-                "pattern_name": "llm_prefix",
-                "metadata": metadata
-            })
-        
-        info(f"Applied prefix_based grouping: {len(subject_records)} subjects")
-    
-    elif method == "directory_based":
-        # LLM provided extraction pattern
-        extraction_pattern = grouping.get("extraction_pattern")
-        subject_group = grouping.get("subject_from_group", 1)
-        site_group = grouping.get("site_from_group")
-        
-        seen_ids = set()
-        for filepath in all_files:
-            parts = filepath.split('/')
-            for part in parts[:3]:
-                match = re.search(extraction_pattern, part)
-                if match and len(match.groups()) >= subject_group:
-                    subject_id = match.group(subject_group)
-                    if subject_id not in seen_ids:
-                        seen_ids.add(subject_id)
-                        
-                        site = None
-                        if site_group and len(match.groups()) >= site_group:
-                            site = match.group(site_group)
-                        
-                        subject_records.append({
-                            "numeric_id": subject_id,
-                            "original_id": match.group(0),
-                            "site": site,
-                            "pattern_name": "llm_directory"
-                        })
-                    break
-        
-        info(f"Applied directory_based grouping: {len(subject_records)} subjects")
-    
-    elif method == "filename_pattern":
-        # LLM provided filename extraction regex
-        extraction_regex = grouping.get("extraction_regex")
-        subject_group = grouping.get("subject_from_group", 1)
-        
-        seen_ids = set()
-        for filepath in all_files:
-            match = re.search(extraction_regex, filepath)
-            if match and len(match.groups()) >= subject_group:
-                subject_id = match.group(subject_group)
-                if subject_id not in seen_ids:
-                    seen_ids.add(subject_id)
-                    subject_records.append({
-                        "numeric_id": subject_id,
-                        "original_id": subject_id,
-                        "pattern_name": "llm_filename"
-                    })
-        
-        info(f"Applied filename_pattern grouping: {len(subject_records)} subjects")
-    
-    elif method == "single_subject":
-        # All files belong to one subject
-        subject_records.append({
-            "numeric_id": "01",
-            "original_id": "01",
-            "pattern_name": "single"
-        })
-        info("Single subject dataset")
-    
-    else:
-        # Use whatever LLM provided in subjects.labels
-        labels = plan.get("subjects", {}).get("labels", [])
-        for label in labels:
-            subject_records.append({
-                "numeric_id": str(label),
-                "original_id": str(label),
-                "pattern_name": "llm_provided"
-            })
-        info(f"Using LLM-provided subject list: {len(subject_records)} subjects")
-    
-    return {
-        "extraction_method": method or "llm_directed",
-        "subject_records": subject_records,
-        "subject_count": len(subject_records),
-        "grouping_strategy": grouping
-    }
-
-def _create_participants_with_llm_metadata(subject_info: Dict, metadata: Dict, out_dir: Path) -> None:
-    """
-    Create participants.tsv using LLM-provided participant metadata.
+    This is the key fix: we trust Python's analysis over LLM's extraction.
     
     Args:
-        subject_info: Subject records from grouping
-        metadata: Dict[subject_id, Dict[column, value]]
-            Example: {"1": {"sex": "M", "group": "cadaver"}, "2": {"sex": "F", "group": "cadaver"}}
+        all_files: Complete file list
+        structure_analysis: From evidence bundle
+        llm_plan: LLM's plan (for metadata only)
+    
+    Returns:
+        Subject records with full information
     """
+    subject_detection = structure_analysis.get("subject_detection", {})
+    best_candidate = subject_detection.get("best_candidate")
+    
+    if not best_candidate:
+        warn("⚠ No subject pattern detected in evidence analysis")
+        # Try to use LLM's labels as fallback
+        labels = llm_plan.get("subjects", {}).get("labels", [])
+        if labels:
+            return {
+                "extraction_method": "llm_labels_fallback",
+                "subject_records": [{"numeric_id": str(l), "original_id": str(l)} for l in labels],
+                "subject_count": len(labels)
+            }
+        else:
+            return {
+                "extraction_method": "failed",
+                "subject_records": [],
+                "subject_count": 0
+            }
+    
+    # Use evidence's best candidate to extract subjects
+    extraction_regex = best_candidate["extraction_regex"]
+    subject_group = best_candidate["subject_group"]
+    site_group = best_candidate.get("site_group")
+    
+    info(f"  Using pattern: {best_candidate['pattern_display']}")
+    info(f"  Extraction regex: {extraction_regex}")
+    
+    # CRITICAL: Use the helper function that fixes regex escapes!
+    subject_records_raw = extract_subject_ids_from_paths(
+        all_files,
+        extraction_regex,
+        subject_group,
+        site_group
+    )
+    
+    # Convert to standard format
+    subject_records = []
+    for rec in subject_records_raw:
+        subject_records.append({
+            "numeric_id": rec["subject_id"],
+            "original_id": rec["original_dirname"],
+            "site": rec.get("site"),
+            "pattern_name": best_candidate["pattern_name"],
+            "metadata": {"site": rec.get("site")} if rec.get("site") else {}
+        })
+    
+    return {
+        "extraction_method": best_candidate["pattern_name"],
+        "subject_records": subject_records,
+        "subject_count": len(subject_records),
+        "pattern_used": best_candidate["pattern_display"],
+        "confidence": subject_detection.get("confidence", "unknown")
+    }
+
+def _create_participants_with_metadata(subject_info: Dict, metadata: Dict, out_dir: Path) -> None:
+    """Create participants.tsv with LLM-provided metadata"""
     parts_path = out_dir / "participants.tsv"
     
     if parts_path.exists():
-        info(f"✓ participants.tsv already exists, preserving")
+        info(f"✓ participants.tsv already exists")
         return
     
     subject_records = subject_info["subject_records"]
     
-    # Collect all column names from metadata
+    if len(subject_records) == 0:
+        warn("⚠ No subject records to write")
+        return
+    
+    # Collect columns
     all_columns = set()
     for subj_meta in metadata.values():
         all_columns.update(subj_meta.keys())
@@ -457,8 +279,7 @@ def _create_participants_with_llm_metadata(subject_info: Dict, metadata: Dict, o
         bids_id = f"sub-{rec['numeric_id']}"
         row = [bids_id]
         
-        subj_id = rec['numeric_id']
-        subj_meta = metadata.get(subj_id, {})
+        subj_meta = metadata.get(rec['numeric_id'], {})
         
         for col in columns[1:]:
             value = subj_meta.get(col, "n/a")
@@ -472,82 +293,26 @@ def _create_participants_with_llm_metadata(subject_info: Dict, metadata: Dict, o
     info(f"✓ Created participants.tsv ({len(subject_records)} subjects)")
     info(f"  Columns: {', '.join(columns)}")
     
-    # === 新增: 自动生成 participants.json ===
+    # Auto-generate participants.json
     _create_participants_json(metadata, out_dir)
 
 def _create_simple_participants_tsv(subject_info: Dict, out_dir: Path) -> None:
-    """Create simple participants.tsv with only participant_id."""
+    """Create simple participants.tsv (participant_id only)"""
     parts_path = out_dir / "participants.tsv"
     
     if parts_path.exists():
-        info(f"✓ participants.tsv already exists, preserving")
+        info(f"✓ participants.tsv already exists")
         return
     
     subject_records = subject_info.get("subject_records", [])
     
+    if len(subject_records) == 0:
+        warn("⚠ No subject records")
+        return
+    
     lines = ["participant_id\n"]
     for rec in subject_records:
-        bids_id = f"sub-{rec['numeric_id']}"
-        lines.append(f"{bids_id}\n")
+        lines.append(f"sub-{rec['numeric_id']}\n")
     
-    content = "".join(lines)
-    write_text(parts_path, content)
+    write_text(parts_path, "".join(lines))
     info(f"✓ Created participants.tsv ({len(subject_records)} subjects)")
-
-def nirs_tables_to_normalized(model: str, evidence: Dict[str, Any], user_edited_draft: Optional[Dict[str, Any]], out_dir: Path) -> Dict[str, Any]:
-    if user_edited_draft is None:
-        info("Generating NIRS headers draft...")
-        payload = json.dumps({"samples": evidence.get("samples", []), "documents": evidence.get("documents", []), "user_text": evidence.get("user_hints", {}).get("user_text", "")}, ensure_ascii=False)
-        try:
-            response_text = llm_nirs_draft(model, payload)
-            draft_obj = _parse_llm_json_response(response_text, "NIRS_draft")
-            if draft_obj is None:
-                return {"status": "error", "questions": []}
-        except Exception as e:
-            fatal(f"NIRS draft failed: {e}")
-            return {"status": "error", "questions": []}
-        write_json(Path(out_dir) / HEADERS_DRAFT, draft_obj)
-        info(f"✓ Draft saved")
-        return {"status": "draft_written", "questions": draft_obj.get("questions", [])}
-    else:
-        info("Normalizing NIRS headers...")
-        payload = json.dumps(user_edited_draft, ensure_ascii=False)
-        try:
-            response_text = llm_nirs_normalize(model, payload)
-            normalized_obj = _parse_llm_json_response(response_text, "NIRS_normalize")
-            if normalized_obj is None:
-                return {"status": "error", "questions": []}
-        except Exception as e:
-            fatal(f"NIRS normalize failed: {e}")
-            return {"status": "error", "questions": []}
-        write_json(Path(out_dir) / HEADERS_NORMALIZED, normalized_obj)
-        info(f"✓ Normalized saved")
-        questions = normalized_obj.get("questions", [])
-        has_blocks = any(q.get("severity") == SEVERITY_BLOCK for q in questions)
-        return {"status": "blocked" if has_blocks else "normalized", "normalized": normalized_obj, "questions": questions}
-
-def mri_arrays_to_final_plan(model: str, arrays_meta: Dict[str, Any], user_edited_draft: Optional[Dict[str, Any]], out_dir: Path) -> Dict[str, Any]:
-    if user_edited_draft is None:
-        info("Generating MRI voxel draft...")
-        try:
-            response_text = llm_mri_voxel_draft(model, json.dumps(arrays_meta))
-            draft_obj = _parse_llm_json_response(response_text, "MRI_draft")
-            if draft_obj is None:
-                return {"status": "error"}
-        except Exception as e:
-            fatal(f"MRI draft failed: {e}")
-            return {"status": "error"}
-        write_json(Path(out_dir) / VOXEL_DRAFT, draft_obj)
-        return {"status": "draft_written", "questions": draft_obj.get("questions", [])}
-    else:
-        info("Generating MRI final plan...")
-        try:
-            response_text = llm_mri_voxel_final(model, json.dumps(user_edited_draft))
-            final_obj = _parse_llm_json_response(response_text, "MRI_final")
-            if final_obj is None:
-                return {"status": "error"}
-        except Exception as e:
-            fatal(f"MRI final failed: {e}")
-            return {"status": "error"}
-        write_json(Path(out_dir) / VOXEL_FINAL_PLAN, final_obj)
-        return {"status": "final_ready", "final_plan": final_obj}
