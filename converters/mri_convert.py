@@ -16,7 +16,8 @@ def check_dcm2niix_available() -> bool:
     return shutil.which("dcm2niix") is not None
 
 def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path, 
-                       temp_dir: Optional[Path] = None) -> Optional[Path]:
+                       temp_dir: Optional[Path] = None,
+                       quiet: bool = False) -> Optional[Path]:  # ADDED quiet parameter
     """
     Convert a batch of DICOM files to a single NIfTI volume.
     
@@ -24,17 +25,20 @@ def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path,
         dicom_files: List of DICOM files to convert (should be from same series)
         output_path: Desired output NIfTI path
         temp_dir: Temporary directory for conversion (will create if None)
+        quiet: If True, suppress verbose output (NEW)
     
     Returns:
         Path to created NIfTI file, or None if conversion failed
     """
     if not check_dcm2niix_available():
-        warn("dcm2niix not found in PATH")
-        warn("Install with: apt-get install dcm2niix (Ubuntu) or brew install dcm2niix (macOS)")
+        if not quiet:
+            warn("dcm2niix not found in PATH")
+            warn("Install with: apt-get install dcm2niix (Ubuntu) or brew install dcm2niix (macOS)")
         return None
     
     if not dicom_files:
-        warn("No DICOM files provided for conversion")
+        if not quiet:
+            warn("No DICOM files provided for conversion")
         return None
     
     # Create temp directory if not provided
@@ -47,7 +51,8 @@ def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path,
     
     try:
         # Copy DICOM files to temp directory
-        info(f"  Converting {len(dicom_files)} DICOM files...")
+        if not quiet:
+            info(f"  Converting {len(dicom_files)} DICOM files...")
         
         for dcm_file in dicom_files:
             dst = temp_dir / dcm_file.name
@@ -69,14 +74,16 @@ def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path,
         )
         
         if result.returncode != 0:
-            warn(f"  dcm2niix failed: {result.stderr}")
+            if not quiet:
+                warn(f"  dcm2niix failed: {result.stderr}")
             return None
         
         # Find generated NIfTI file
         nifti_files = list(temp_dir.glob("temp_output*.nii.gz"))
         
         if not nifti_files:
-            warn(f"  dcm2niix did not generate NIfTI file")
+            if not quiet:
+                warn(f"  dcm2niix did not generate NIfTI file")
             return None
         
         # Move to final location
@@ -88,17 +95,21 @@ def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path,
         if json_files:
             json_output = output_path.parent / (output_path.stem.replace('.nii', '') + '.json')
             shutil.move(str(json_files[0]), str(json_output))
-            info(f"  ✓ Created sidecar: {json_output.name}")
+            if not quiet:
+                info(f"  ✓ Created sidecar: {json_output.name}")
         
-        info(f"  ✓ Created: {output_path.name}")
+        if not quiet:
+            info(f"  ✓ Created: {output_path.name}")
         
         return output_path
         
     except subprocess.TimeoutExpired:
-        warn(f"  dcm2niix timed out")
+        if not quiet:
+            warn(f"  dcm2niix timed out")
         return None
     except Exception as e:
-        warn(f"  dcm2niix error: {e}")
+        if not quiet:
+            warn(f"  dcm2niix error: {e}")
         return None
     finally:
         # Cleanup temp directory if we created it

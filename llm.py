@@ -66,6 +66,7 @@ def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temp
     except Exception as e:
         raise LLMHardFail(step, "UnexpectedError", str(e))
 
+# Keep existing prompts unchanged
 PROMPT_CLASSIFICATION = """You are a neuroimaging data triage expert.
 
 Input: evidence bundle with documents[] containing full protocol text.
@@ -180,473 +181,167 @@ Output JSON (ONLY valid JSON):
   "questions": []
 }"""
 
+# UPDATED PROMPT with filename token analysis support
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+═══════════════════════════════════════════════════════════════════════════
 MISSION: Design a complete BIDS conversion plan for ANY neuroimaging dataset
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+═══════════════════════════════════════════════════════════════════════════
 
 CRITICAL YAML ESCAPING:
 - Use DOUBLE backslashes in regex: \\\\d \\\\w \\\\s (NOT \\d \\w \\s)
 
 INPUT STRUCTURE:
 {
-  "file_structure": {
-    "all_files": [complete list of ALL files with full paths/names],
-    "total_files": number,
-    "counts_by_ext": {".dcm": 2979, ...}
+  "file_count": total_files,
+  "counts_by_ext": {".dcm": 2979, ...},
+  "sample_files": [representative file paths],
+  
+  "user_hints": {
+    "n_subjects": number or null,
+    "user_text": "User's description",
+    "modality_hint": "mri|nirs|mixed"
   },
-  "user_context": {
-    "description": "User's explanation of dataset (READ THIS FIRST!)",
-    "n_subjects_hint": number or null,
-    "modality_hint": "mri" | "nirs" | "mixed" | null
+  
+  "subject_summary": {
+    "total_subjects": number (from directory analysis),
+    "pattern_types": ["site_prefixed", ...],
+    "pattern_examples": {...}
   },
-  "documents": [
-    {"filename": "protocol.pdf", "content": "full text..."}
-  ],
-  "python_observations": {
-    "unique_prefixes": ["VHM", "VHF", ...],
-    "unique_keywords": ["Head", "Hip", ...],
-    "directory_structure": "flat" | "hierarchical",
-    "note": "Any patterns Python noticed without interpretation"
+  
+  "filename_token_analysis": {
+    "total_files": 2979,
+    "dominant_prefixes": [
+      {"prefix": "VHM", "count": 1500, "percentage": 50.4},
+      {"prefix": "VHF", "count": 1479, "percentage": 49.6}
+    ],
+    "token_frequency": {"VHM": 1500, "CT": 2979, ...},
+    "insights": [
+      "Two major prefixes detected: 'VHM' (50.4%) and 'VHF' (49.6%)"
+    ]
+  },
+  
+  "analysis_decision": {
+    "use_filename_analysis": true/false,
+    "path_subjects": number,
+    "filename_subjects": number
   }
 }
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 1: UNDERSTAND THE DATASET (Your primary responsibility!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+═══════════════════════════════════════════════════════════════════════════
+CRITICAL: HANDLING FLAT VS HIERARCHICAL STRUCTURES
+═══════════════════════════════════════════════════════════════════════════
 
-Read user_context.description to extract:
-1. Subject count and identification method
-   - "2 subjects: male and female" → 2 subjects
-   - "VHM = male, VHF = female" → prefix-based mapping
-   - "650 participants" → 650 subjects
+SCENARIO 1: Flat structure (all files in one directory)
+  - subject_summary.total_subjects = 0
+  - filename_token_analysis.dominant_prefixes = ["VHM", "VHF"]
+  - analysis_decision.use_filename_analysis = true
+  
+  ACTION: Use filename_token_analysis to determine subjects!
+  
+  Example:
+    Filename samples: ["VHMCT1mm-Hip (134).dcm", "VHFCT1mm-Head (89).dcm"]
+    Dominant prefixes: VHM (50%), VHF (50%)
+    User hint: n_subjects = 2
+    
+    CONCLUSION: VHM = subject "1", VHF = subject "2"
+    
+    Output:
+      subject_grouping:
+        method: filename_prefix
+        rules:
+          - prefix: "VHM"
+            maps_to_subject: "1"
+            match_pattern: "VHM.*"
+            metadata:
+              sex: "M"
+          - prefix: "VHF"
+            maps_to_subject: "2"
+            match_pattern: "VHF.*"
+            metadata:
+              sex: "F"
 
-2. Subject-to-filename mapping rules
-   - How are subjects identified in filenames?
-   - Prefixes? Directory names? Embedded IDs?
+SCENARIO 2: Hierarchical structure (subjects have directories)
+  - subject_summary.total_subjects > 0
+  - subject_summary.pattern_types = ["site_prefixed"]
+  - analysis_decision.use_filename_analysis = false
+  
+  ACTION: Use subject_summary (Python already detected subjects)
+  
+  Example:
+    Pattern examples: ["Cambridge_sub06272", "Beijing_sub82980"]
+    
+    Python already created assignment_rules, just validate them!
 
-3. Participant metadata
-   - Sex, age, group, site, etc.
-   - Extract from description
+═══════════════════════════════════════════════════════════════════════════
+STEP 1: DETERMINE SUBJECT GROUPING METHOD
+═══════════════════════════════════════════════════════════════════════════
 
-4. File organization logic
-   - Body parts → acquisition variants
-   - Tasks → task entities
-   - Runs → run entities
+Check analysis_decision.use_filename_analysis:
 
-Analyze all_files to validate and discover:
-- Count unique subject identifiers
-- Find all variants (body parts, tasks, acquisitions)
-- Detect file format (DICOM, NIfTI, CSV, etc.)
-- Identify modality types
+IF TRUE (flat structure):
+  - Analyze filename_token_analysis.dominant_prefixes
+  - Match prefix count with user_hints.n_subjects
+  - Design filename_prefix grouping rules
+  - Extract participant metadata from user_hints.user_text
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL: BIDS-COMPLIANT MODALITY SUFFIXES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IF FALSE (hierarchical):
+  - Validate subject_summary.pattern_examples
+  - Python already provided grouping via assignment_rules
+  - Just add participant_metadata if available
 
-BIDS anatomical modality suffixes (MUST use these EXACT names):
-- T1w: T1-weighted MRI
-- T2w: T2-weighted MRI
-- T1rho: T1-rho MRI
-- T1map: Quantitative T1 map
-- T2map: Quantitative T2 map
-- T2star: T2* weighted MRI
-- FLAIR: Fluid attenuated inversion recovery
-- FLASH: Fast low angle shot MRI
-- PD: Proton density weighted MRI
-- PDmap: Quantitative PD map
-- PDT2: Combined PD/T2 weighted MRI
-- inplaneT1: T1 weighted in plane
-- inplaneT2: T2 weighted in plane
-- angio: Angiography (MR or CT)
-- defacemask: Defacing mask
-- SWImagandphase: Susceptibility weighted imaging
+═══════════════════════════════════════════════════════════════════════════
+CT SCAN HANDLING (unchanged from before)
+═══════════════════════════════════════════════════════════════════════════
 
-CRITICAL CT SCAN HANDLING:
-❌ NEVER use these as modality suffix: CT, ct, CTscan, CT-scan, ctscan
-✓ For CT scans, ALWAYS use "T1w" as the modality suffix
-✓ Use acquisition label to specify it's CT data: acq-ct, acq-cthip, acq-ctchest
+✓ For CT scans, ALWAYS use "T1w" suffix
+✓ Use acquisition label: acq-ct, acq-cthip, acq-cthead
+✗ NEVER use CT, ct, CTscan as modality suffix
 
-Why T1w for CT? CT provides structural anatomy similar to T1-weighted MRI. BIDS does
-not have a dedicated CT suffix, so T1w is the appropriate choice for structural CT imaging.
+Example:
+  Input:  "VHMCT1mm-Hip (134).dcm"
+  Output: "sub-1_acq-cthip_T1w.nii.gz"
 
-Examples of CORRECT CT naming:
-✓ sub-01_acq-ct_T1w.nii.gz              (general CT scan)
-✓ sub-01_acq-ctchest_T1w.nii.gz         (CT of chest)
-✓ sub-01_acq-cthead_T1w.nii.gz          (CT of head)
-✓ sub-02_acq-cthip_T1w.nii.gz           (CT of hip)
-✓ sub-03_acq-ctabdomen_T1w.nii.gz       (CT of abdomen)
-
-Examples of INCORRECT CT naming (DO NOT USE):
-❌ sub-01_CT.nii.gz                      (not BIDS compliant)
-❌ sub-01_acq-chest_CT.nii.gz            (CT suffix not allowed)
-❌ sub-01_ct.nii.gz                      (not valid)
-❌ sub-01_acq-hip_CTscan.nii.gz          (not BIDS compliant)
-
-How to detect CT scans:
-1. Look for "CT" in filename patterns (e.g., "VHMCT1mm-Hip")
-2. Check DICOM headers if available (Modality tag)
-3. Read user description for mentions of "CT scan", "computed tomography"
-4. File naming patterns like "*CT*", "*ct*" in original data
-
-When you encounter CT data:
-1. Detect it's CT from filename, description, or metadata
-2. Use acq-ct{bodypart} or acq-ct to preserve CT information
-3. ALWAYS use T1w as the modality suffix (never CT)
-4. Document in README that these are CT scans converted to T1w format
-
-Example transformation for CT data:
-Input:  "VHMCT1mm-Hip (134).dcm"  (CT scan of hip, detected from "CT" in name)
-Output: "sub-1_acq-cthip_T1w.nii.gz"  ✓ CORRECT (T1w suffix, ct in acquisition)
-NOT:    "sub-1_acq-hip_CT.nii.gz"     ❌ WRONG (CT suffix not allowed)
-
-Input:  "patient_001_chest_ct.dcm"
-Output: "sub-001_acq-ctchest_T1w.nii.gz"  ✓ CORRECT
-NOT:    "sub-001_acq-chest_CT.nii.gz"     ❌ WRONG
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 2: DESIGN SUBJECT GROUPING STRATEGY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Choose the appropriate grouping method:
-
-METHOD 1: prefix_based
-When: Subjects identified by filename prefixes
-Example: VHM, VHF, PatientA, SiteB_Patient01
-
-Output structure:
-```yaml
-subject_grouping:
-  method: prefix_based
-  description: "Clear explanation of mapping logic"
-  rules:
-    - prefix: "VHM"
-      maps_to_subject: "1"
-      match_pattern: "VHM.*"
-      metadata:
-        sex: "M"
-        description: "male cadaver"
-    - prefix: "VHF"
-      maps_to_subject: "2"
-      match_pattern: "VHF.*"
-      metadata:
-        sex: "F"
-        description: "female cadaver"
-```
-
-METHOD 2: directory_based  
-When: Each subject has their own directory
-Example: sub-01/, sub-02/, Cambridge_sub06272/
-
-Output structure:
-```yaml
-subject_grouping:
-  method: directory_based
-  extraction_pattern: "([A-Za-z]+)_sub(\\\\d+)"
-  subject_from_group: 2
-  site_from_group: 1
-```
-
-METHOD 3: filename_pattern
-When: Subject ID embedded in filename
-Example: patient_001_scan.nii.gz, subject_025_T1.nii
-
-Output structure:
-```yaml
-subject_grouping:
-  method: filename_pattern
-  extraction_regex: "patient_(\\\\d+)_.*"
-  subject_from_group: 1
-```
-
-METHOD 4: single_subject
-When: All files belong to one subject
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 3: DESIGN FILENAME TRANSFORMATION RULES  
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-For EACH unique filename pattern, create transformation rules.
-
-Analyze filenames to extract BIDS entities:
-- Modality type: For CT use T1w, for MRI use T1w/T2w/BOLD/DWI/etc
-- Acquisition variants: body parts, protocols, contrasts
-- Run numbers: if multiple scans of same type
-- Session: if longitudinal data
-
-BIDS entity patterns:
-- Anatomical: sub-{subject}_[ses-{session}_][acq-{acquisition}_]<modality>.nii.gz
-- Functional: sub-{subject}_[ses-{session}_]task-{task}_[acq-{acq}_][run-{run}_]bold.nii.gz
-- Diffusion: sub-{subject}_[ses-{session}_][acq-{acq}_]dwi.nii.gz
-
-Example transformation design for CT data:
-
-Input filename: VHMCT1mm-Hip (134).dcm
-Analysis:
-  - VHM → subject 1 (from grouping rules)
-  - CT → indicates CT scan → use T1w suffix (NOT CT suffix!)
-  - Hip → body part → acq-cthip (combine ct + bodypart in acquisition label)
-  - (134) → slice number (ignore, dcm2niix will combine)
-
-Output design:
-```yaml
-filename_rules:
-  - match_pattern: "VHM.*-Hip.*\\\\.dcm"
-    bids_template: "sub-1_acq-cthip_T1w.nii.gz"
-    extract_entities:
-      subject: "1"
-      acquisition: "cthip"
-      modality_suffix: "T1w"
-```
-
-CRITICAL: Design rules for ALL observed patterns in all_files!
-Don't just handle examples - handle EVERY file.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 4: DETERMINE FILE FORMAT CONVERSIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Detect file format and set conversion needs:
-
-.dcm files (DICOM):
-```yaml
-format_ready: false
-convert_to: "dicom_to_nifti"
-```
-
-.nii.gz files (already NIfTI):
-```yaml
-format_ready: true
-convert_to: none
-```
-
-.mat files (MATLAB arrays):
-```yaml
-format_ready: false
-convert_to: "mat_to_nifti"
-```
-
-.csv files (fNIRS tables):
-```yaml
-format_ready: false
-convert_to: "csv_to_snirf"
-```
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE OUTPUT 1: Visible Human (Prefix-based grouping with DICOM→NIfTI conversion)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+═══════════════════════════════════════════════════════════════════════════
+OUTPUT STRUCTURE
+═══════════════════════════════════════════════════════════════════════════
 
 subject_grouping:
-  method: prefix_based
-  description: "VHM prefix = male subject (sub-1), VHF prefix = female subject (sub-2)"
-  rules:
-    - prefix: "VHM"
-      maps_to_subject: "1"
-      match_pattern: "VHM.*"
-      metadata:
-        sex: "M"
-        description: "Visible Human Male cadaver"
-    - prefix: "VHF"
-      maps_to_subject: "2"
-      match_pattern: "VHF.*"
-      metadata:
-        sex: "F"
-        description: "Visible Human Female cadaver"
+  method: filename_prefix | directory_based | filename_pattern
+  description: "Explanation"
+  rules: [...]
 
 participant_metadata:
   "1":
     sex: "M"
     group: "cadaver"
-    specimen_id: "Visible Human Male"
   "2":
     sex: "F"
     group: "cadaver"
-    specimen_id: "Visible Human Female"
 
 standardization:
-  apply: true
-  strategy: "prefix_to_numeric_ids"
-  reason: "Converting VHM/VHF prefixes to standard sub-1/sub-2 format"
+  apply: true/false
+  strategy: "..."
+  reason: "..."
 
 subjects:
-  labels: ["1", "2"]
+  labels: ["1", "2", ...]
 
 assignment_rules:
   - subject: "1"
-    prefix: "VHM"
-    match: ["**/VHM*", "**/VHM*.dcm"]
-  - subject: "2"
-    prefix: "VHF"
-    match: ["**/VHF*", "**/VHF*.dcm"]
+    original: "VHM" | "Cambridge_sub06272"
+    match: ["**/VHM*"] | ["**/Cambridge_sub06272/**"]
 
 mappings:
   - modality: mri
     match: ["**/*.dcm"]
     format_ready: false
     convert_to: "dicom_to_nifti"
-    bids_out: "sub-{subject}/anat/sub-{subject}_acq-{bodypart}_T1w.nii.gz"
     filename_rules:
-      - match_pattern: "VHM.*-Head.*\\\\.dcm"
-        bids_template: "sub-1_acq-cthead_T1w.nii.gz"
-        extract_entities:
-          subject: "1"
-          acquisition: "cthead"
       - match_pattern: "VHM.*-Hip.*\\\\.dcm"
         bids_template: "sub-1_acq-cthip_T1w.nii.gz"
-        extract_entities:
-          subject: "1"
-          acquisition: "cthip"
-      - match_pattern: "VHM.*-Shoulder.*\\\\.dcm"
-        bids_template: "sub-1_acq-ctshoulder_T1w.nii.gz"
-        extract_entities:
-          subject: "1"
-          acquisition: "ctshoulder"
-      - match_pattern: "VHM.*-Pelvis.*\\\\.dcm"
-        bids_template: "sub-1_acq-ctpelvis_T1w.nii.gz"
-        extract_entities:
-          subject: "1"
-          acquisition: "ctpelvis"
-      - match_pattern: "VHF.*-Head.*\\\\.dcm"
-        bids_template: "sub-2_acq-cthead_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "cthead"
-      - match_pattern: "VHF.*-Hip.*\\\\.dcm"
-        bids_template: "sub-2_acq-cthip_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "cthip"
-      - match_pattern: "VHF.*-Shoulder.*\\\\.dcm"
-        bids_template: "sub-2_acq-ctshoulder_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "ctshoulder"
-      - match_pattern: "VHF.*-Knee.*\\\\.dcm"
-        bids_template: "sub-2_acq-ctknee_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "ctknee"
-      - match_pattern: "VHF.*-Ankle.*\\\\.dcm"
-        bids_template: "sub-2_acq-ctankle_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "ctankle"
-      - match_pattern: "VHF.*-Pelvis.*\\\\.dcm"
-        bids_template: "sub-2_acq-ctpelvis_T1w.nii.gz"
-        extract_entities:
-          subject: "2"
-          acquisition: "ctpelvis"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE OUTPUT 2: Multi-site Study (Directory-based grouping with NIfTI)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-subject_grouping:
-  method: directory_based
-  extraction_pattern: "([A-Za-z]+)_sub(\\\\d+)"
-  subject_from_group: 2
-  site_from_group: 1
-  
-participant_metadata:
-  "06272":
-    site: "Cambridge"
-  "82980":
-    site: "Beijing"
-
-standardization:
-  apply: true
-  strategy: "extract_site_to_column"
-  reason: "Multi-site dataset with site prefixes in directory names"
-
-subjects:
-  labels: ["06272", "82980", "12345"]
-
-assignment_rules:
-  - subject: "06272"
-    original: "Cambridge_sub06272"
-    site: "Cambridge"
-    match: ["**/Cambridge_sub06272/**"]
-
-mappings:
-  - modality: mri
-    match: ["**/*mprage*.nii.gz", "**/*t1*.nii.gz"]
-    format_ready: true
-    convert_to: none
-    filename_rules:
-      - match_pattern: ".*anonymi[sz]ed.*"
-        bids_template: "sub-{subject}_acq-anonymized_T1w.nii.gz"
-      - match_pattern: ".*skull.*"
-        bids_template: "sub-{subject}_acq-skullstripped_T1w.nii.gz"
-      - match_pattern: ".*mprage.*"
-        bids_template: "sub-{subject}_T1w.nii.gz"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE OUTPUT 3: Standard BIDS (Already compliant, no changes needed)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-subject_grouping:
-  method: directory_based
-  extraction_pattern: "sub-(\\\\d+)"
-  subject_from_group: 1
-
-standardization:
-  apply: false
-  reason: "Already in BIDS format"
-
-subjects:
-  labels: ["01", "02", "03"]
-
-mappings:
-  - modality: mri
-    match: ["**/sub-*/anat/*.nii.gz"]
-    format_ready: true
-    convert_to: none
-    filename_rules: []  # Keep original names
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL INSTRUCTIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. READ user_context.description FIRST - it's your primary guide
-2. ANALYZE all_files to validate and discover patterns
-3. DO NOT assume standard BIDS patterns - every dataset is unique
-4. EXTRACT participant metadata from description (sex, age, group, site, etc.)
-5. DESIGN filename_rules that handle ALL files (not just examples)
-6. For CT scans: ALWAYS use T1w suffix, NEVER use CT suffix
-7. For unusual datasets, BE CREATIVE in grouping strategy
-8. If you cannot determine something, add a BLOCKING question
-
-ENTITY EXTRACTION KEYWORDS (use these to analyze filenames):
-
-Anatomical modalities (use EXACT BIDS suffix):
-- T1w, T2w, FLAIR, PD, angio (NEVER: CT, ct, CTscan)
-- For CT scans: ALWAYS use T1w suffix with acq-ct* label
-
-Functional:
-- BOLD, rest, task, fMRI
-
-Diffusion:
-- DWI, DTI, diffusion
-
-Acquisition variants (map to acq-{variant}):
-- Body parts: head, hip, shoulder, knee, ankle, pelvis, chest, abdomen
-- For CT body parts: cthead, cthip, ctshoulder, ctknee, etc.
-- Protocols: anonymized, skullstripped, normalized
-- Contrasts: gad, contrast
-- Sequences: mprage, space, spgr, epi
-
-Run/Session indicators:
-- run, r, repeat, session, ses, visit, timepoint
-
-REMEMBER: 
-- You have complete authority to design the conversion plan
-- Python will execute YOUR decisions exactly as specified
-- The goal is a valid BIDS dataset that preserves all information
-- Every dataset is unique - design rules that fit THIS dataset
-- CT scans MUST use T1w suffix, not CT
-
-OUTPUT: Raw YAML only (no markdown fences, no extra text before or after)
+OUTPUT: Raw YAML only (no markdown fences, no extra text)
 """
 
 def llm_classify(model: str, payload: str) -> str:

@@ -1,17 +1,6 @@
 # constants.py
 # Global constants and configurations
 
-"""
-中文说明：
-全局常量定义模块
-
-包含：
-1. 文件名常量
-2. License白名单（BIDS标准）
-3. 严重级别定义
-4. 其他配置常量
-"""
-
 # ==================== TRIO FILE NAMES ====================
 TRIO_DATASET_DESC = "dataset_description.json"
 TRIO_README = "README.md"
@@ -55,7 +44,7 @@ LICENSE_DESCRIPTIONS = {
     "GPL-2.0": "GPL-2.0 - GNU General Public License v2.0 only",
     "GPL-2.0+": "GPL-2.0+ - GNU General Public License v2.0 and later",
     "GPL-3.0": "GPL-3.0 - GNU General Public License v3.0 only",
-    "GPL-3.0+": "GPL-3.0+ - GNU General Public License v3.0 and later",
+    "GPL-3.0+": "GPL-3.0+ - GNU General Public License v3.0 or later",
     "LGPL-3.0+": "LGPL-3.0+ - GNU Lesser General Public License v3.0 or later",
     "GFDL-1.3": "GFDL-1.3 - GNU Free Documentation License v1.3",
     "CC-BY-NC-4.0": "CC-BY-NC-4.0 - Creative Commons Attribution Non Commercial 4.0",
@@ -93,11 +82,12 @@ NIRS_POOL = "_staging/nirs_pool"
 MRI_POOL = "_staging/mri_pool"
 UNKNOWN_POOL = "_staging/unknown"
 
-HEADERS_DRAFT = "_staging/headers_draft.json"
-HEADERS_NORMALIZED = "_staging/headers_normalized.json"
-VOXEL_DRAFT = "_staging/voxel_draft.json"
-VOXEL_FINAL_PLAN = "_staging/voxel_final_plan.json"
-BIDS_PLAN = "_staging/BIDSPlan.yaml"
+# CRITICAL FIX: Remove path prefix from these constants
+HEADERS_DRAFT = "nirs_headers_draft.json"
+HEADERS_NORMALIZED = "nirs_headers_normalized.json"
+VOXEL_DRAFT = "mri_voxel_draft.json"
+VOXEL_FINAL_PLAN = "mri_voxel_final_plan.json"
+BIDS_PLAN = "BIDSPlan.yaml"  # Just filename, no "_staging/" prefix
 
 # ==================== DEFAULT VALUES ====================
 DEFAULT_MODEL = "gpt-4o"

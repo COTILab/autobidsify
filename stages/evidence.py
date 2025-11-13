@@ -1,12 +1,13 @@
 # evidence.py v2
-# Evidence bundle builder with universal analysis engine
+# Evidence bundle builder with universal analysis engine + filename tokenizer
 
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set, Tuple  # CRITICAL: Added Tuple!
+from typing import Dict, Any, List, Optional, Set, Tuple
 from collections import defaultdict
 from utils import list_all_files, write_json, sha1_head, warn, info, fatal, copy_file, read_json
 from constants import MAX_TEXT_SIZE, MAX_PDF_SIZE, MAX_DOCX_SIZE, MAX_PDF_PAGES
 from universal_core import FileStructureAnalyzer
+from filename_tokenizer import analyze_filenames_for_subjects  # NEW IMPORT
 import csv
 import re
 
@@ -164,7 +165,19 @@ def _promote_trio_files(data_root: Path, output_dir: Path) -> Dict[str, List[str
     return promoted
 
 def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]], 
-                                target_samples_per_ext: int = 5) -> Tuple[List[Path], Dict]:
+                                target_samples_per_ext: int = 5,
+                                ensure_full_coverage: bool = False) -> Tuple[List[Path], Dict]:
+    """
+    Intelligently sample files for document extraction.
+    
+    Args:
+        files_by_ext: Files grouped by extension
+        target_samples_per_ext: Target number of samples per extension
+        ensure_full_coverage: If True, sample ALL unique patterns (for flat structures)
+    
+    Returns:
+        (sampled_files, pattern_summary)
+    """
     samples = []
     pattern_summary = {}
     
@@ -173,50 +186,60 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
         
         for filepath in file_list:
             filename = filepath.name
-            pattern = re.sub(r'\s*\(\d+\)', '', filename)
-            pattern = re.sub(r'\d+', 'N', pattern)
+            # Extract pattern: remove numbers and parentheses
+            pattern = re.sub(r'\d+', 'N', filename)
+            pattern = re.sub(r'\s*\([^)]*\)', '', pattern)
             pattern_groups[pattern].append(filepath)
         
         n_patterns = len(pattern_groups)
-        samples_per_pattern = max(1, target_samples_per_ext // n_patterns) if n_patterns > 0 else target_samples_per_ext
         
-        ext_samples = []
-        pattern_info = []
-        
-        for pattern, files in sorted(pattern_groups.items()):
-            n_samples = min(len(files), samples_per_pattern)
-            group_samples = files[:n_samples]
-            ext_samples.extend(group_samples)
+        # CRITICAL: For flat structures, ensure we see ALL patterns
+        if ensure_full_coverage:
+            # Take 1 sample from EVERY pattern
+            ext_samples = []
+            for pattern, files in sorted(pattern_groups.items()):
+                ext_samples.append(files[0])
             
+            info(f"  {ext}: Full coverage mode - {len(ext_samples)} patterns sampled")
+        else:
+            # Original logic: target samples per extension
+            samples_per_pattern = max(1, target_samples_per_ext // n_patterns) if n_patterns > 0 else target_samples_per_ext
+            
+            ext_samples = []
+            for pattern, files in sorted(pattern_groups.items()):
+                n_samples = min(len(files), samples_per_pattern)
+                group_samples = files[:n_samples]
+                ext_samples.extend(group_samples)
+            
+            # Pad if needed
+            if len(ext_samples) < target_samples_per_ext:
+                remaining = target_samples_per_ext - len(ext_samples)
+                large_groups = sorted(pattern_groups.items(), key=lambda x: len(x[1]), reverse=True)
+                
+                for pattern, files in large_groups:
+                    if remaining <= 0:
+                        break
+                    
+                    already_sampled = [f for f in ext_samples if f in files]
+                    available = [f for f in files if f not in already_sampled]
+                    
+                    n_additional = min(remaining, len(available))
+                    if n_additional > 0:
+                        ext_samples.extend(available[:n_additional])
+                        remaining -= n_additional
+        
+        samples.extend(ext_samples)
+        
+        # Build pattern info
+        pattern_info = []
+        for pattern, files in sorted(pattern_groups.items()):
+            sampled_count = sum(1 for f in ext_samples if f in files)
             pattern_info.append({
                 "pattern": pattern,
                 "total_files": len(files),
-                "sampled": n_samples,
-                "example_files": [f.name for f in group_samples[:2]]
+                "sampled": sampled_count,
+                "example_files": [f.name for f in files[:2]]
             })
-        
-        if len(ext_samples) < target_samples_per_ext:
-            remaining = target_samples_per_ext - len(ext_samples)
-            large_groups = sorted(pattern_groups.items(), key=lambda x: len(x[1]), reverse=True)
-            
-            for pattern, files in large_groups:
-                if remaining <= 0:
-                    break
-                
-                already_sampled = [f for f in ext_samples if f in files]
-                available = [f for f in files if f not in already_sampled]
-                
-                n_additional = min(remaining, len(available))
-                if n_additional > 0:
-                    ext_samples.extend(available[:n_additional])
-                    remaining -= n_additional
-                    
-                    for p_info in pattern_info:
-                        if p_info["pattern"] == pattern:
-                            p_info["sampled"] += n_additional
-                            break
-        
-        samples.extend(ext_samples)
         
         pattern_summary[ext] = {
             "total_patterns": n_patterns,
@@ -236,6 +259,9 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
 
     all_file_paths = [str(p.relative_to(root)).replace("\\","/") for p in files]
     
+    # ========================================================================
+    # ANALYSIS 1: Directory structure analysis (existing)
+    # ========================================================================
     info("Analyzing file structure with universal engine...")
     analyzer = FileStructureAnalyzer(all_file_paths)
     
@@ -251,7 +277,7 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         info(f"  Detected: {best['count']} subjects (confidence: {subject_detection_result['confidence']})")
         info(f"  Avg files/subject: {best['avg_files_per_subject']:.1f}")
     else:
-        warn("  ⚠ No subject pattern detected")
+        warn("  ⚠ No subject pattern detected from directory structure")
     
     duplicates = analyzer.detect_duplicate_filenames()
     if duplicates:
@@ -262,6 +288,28 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     tree_summary = analyzer.build_directory_tree_summary(max_subjects=50)
     info(f"  Structure summary: {tree_summary['sampled_subjects']}/{tree_summary['total_subjects_detected']} subjects")
     
+    # ========================================================================
+    # ANALYSIS 2: Filename token analysis (NEW!)
+    # ========================================================================
+    info("\nAnalyzing filename token patterns...")
+    filename_analysis = analyze_filenames_for_subjects(all_file_paths, {
+        "n_subjects": user_n_subjects,
+        "user_text": user_text
+    })
+    
+    info(f"  Token-based analysis: {filename_analysis['confidence']} confidence")
+    info(f"  {filename_analysis['recommendation']}")
+    
+    # Show dominant prefixes if found
+    dominant_prefixes = filename_analysis['python_statistics'].get('dominant_prefixes', [])
+    if dominant_prefixes:
+        info(f"  Dominant filename prefixes:")
+        for p in dominant_prefixes[:5]:
+            info(f"    '{p['prefix']}': {p['count']} files ({p['percentage']}%)")
+    
+    # ========================================================================
+    # File sampling and document extraction
+    # ========================================================================
     by_ext: Dict[str, List[Path]] = {}
     for p in files:
         key = ".nii.gz" if p.name.lower().endswith(".nii.gz") else p.suffix.lower()
@@ -308,19 +356,39 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         
         samples.append(entry)
     
+    # ========================================================================
+    # Determine final subject count (prioritize filename analysis if better)
+    # ========================================================================
+    path_based_count = subject_detection_result["best_candidate"]["count"] if subject_detection_result["best_candidate"] else 0
+    path_based_confidence = subject_detection_result["confidence"]
+    
+    filename_based_count = len(filename_analysis['python_statistics'].get('dominant_prefixes', []))
+    filename_based_confidence = filename_analysis['confidence']
+    
     if user_n_subjects is not None:
         final_count = user_n_subjects
         count_source = "user_provided"
         info(f"\nUsing user-provided subject count: {final_count}")
-    elif subject_detection_result["best_candidate"]:
-        final_count = subject_detection_result["best_candidate"]["count"]
-        count_source = "auto_detected"
-        info(f"\nUsing auto-detected subject count: {final_count}")
+    elif path_based_confidence == "high":
+        final_count = path_based_count
+        count_source = "path_based_high_confidence"
+        info(f"\nUsing path-based detection (high confidence): {final_count}")
+    elif filename_based_confidence in ["high", "medium"] and path_based_count == 0:
+        final_count = filename_based_count
+        count_source = "filename_based"
+        info(f"\nUsing filename token analysis (path-based found 0): {final_count}")
+    elif path_based_count > 0:
+        final_count = path_based_count
+        count_source = "path_based"
+        info(f"\nUsing path-based detection: {final_count}")
     else:
         final_count = 1
         count_source = "fallback"
-        warn("\n⚠ Could not detect subject count, using fallback: 1")
+        warn("\n⚠ Could not detect subject count from either path or filename, using fallback: 1")
     
+    # ========================================================================
+    # Build evidence bundle
+    # ========================================================================
     bundle = {
         "root": str(root),
         "counts_by_ext": {ext: len(lst) for ext, lst in by_ext.items()},
@@ -337,6 +405,9 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
             "analyzer_confidence": subject_detection_result["confidence"]
         },
         
+        # NEW: Add filename token analysis
+        "filename_analysis": filename_analysis,
+        
         "user_hints": {
             "n_subjects": final_count,
             "modality_hint": str(modality_hint) if modality_hint else "",
@@ -344,12 +415,14 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         },
         
         "subject_detection": {
-            "method": "universal_analyzer",
-            "detected_count": subject_detection_result["best_candidate"]["count"] if subject_detection_result["best_candidate"] else None,
-            "confidence": subject_detection_result["confidence"],
+            "method": "hybrid_analysis",
+            "path_based_count": path_based_count,
+            "path_based_confidence": path_based_confidence,
+            "filename_based_count": filename_based_count,
+            "filename_based_confidence": filename_based_confidence,
             "final_count": final_count,
             "count_source": count_source,
-            "best_pattern": subject_detection_result["best_candidate"]["pattern_display"] if subject_detection_result["best_candidate"] else None
+            "best_pattern": subject_detection_result["best_candidate"]["pattern_display"] if subject_detection_result["best_candidate"] else "none"
         },
         
         "document_summary": {
@@ -371,10 +444,10 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         info(f"Total document text: {bundle['document_summary']['total_text_length']:,} characters")
     
     info("\n=== Universal Analysis Summary ===")
-    info(f"Subject detection: {bundle['subject_detection']['confidence']} confidence")
-    if subject_detection_result["best_candidate"]:
-        info(f"  Pattern: {subject_detection_result['best_candidate']['pattern_display']}")
-        info(f"  Count: {subject_detection_result['best_candidate']['count']}")
+    info(f"Subject detection (hybrid):")
+    info(f"  Path-based: {path_based_count} subjects ({path_based_confidence} confidence)")
+    info(f"  Filename-based: {filename_based_count} subjects ({filename_based_confidence} confidence)")
+    info(f"  Final decision: {final_count} subjects (source: {count_source})")
     info(f"Duplicate handling: {len(duplicates)} duplicate filenames detected")
     info(f"Sampling: {sum(s['total_patterns'] for s in pattern_summary.values())} unique patterns")
     
@@ -438,4 +511,4 @@ def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     info(f"Total files: {len(bundle['all_files'])}")
     info(f"File types: {len(bundle['counts_by_ext'])}")
     info(f"Subject count: {bundle['subject_detection']['final_count']} (source: {bundle['subject_detection']['count_source']})")
-    info(f"Detection confidence: {bundle['subject_detection']['confidence']}")
+    info(f"Detection confidence: hybrid ({bundle['subject_detection']['path_based_confidence']} path, {bundle['subject_detection']['filename_based_confidence']} filename)")

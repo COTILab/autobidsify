@@ -2,17 +2,17 @@
 # Universal file analysis and matching engine - zero assumptions, data-driven
 
 """
-通用文件分析与匹配引擎
+Universal File Analysis and Matching Engine
 
-设计理念:
-- Python 负责精确的数据分析和统计
-- LLM 负责语义理解和决策
-- 匹配使用结构化特征,不依赖脆弱的 regex
+Design Philosophy:
+- Python handles precise data analysis and statistics
+- LLM handles semantic understanding and decision making
+- Matching uses structured features, not fragile regex
 
-核心类:
-1. FileStructureAnalyzer - 分析文件结构,检测被试
-2. UniversalFileMatcher - 零 regex 的特征匹配
-3. SmartFileGrouper - 智能分组与去重
+Core Classes:
+1. FileStructureAnalyzer - Analyze file structure, detect subjects
+2. UniversalFileMatcher - Zero-regex feature-based matching
+3. SmartFileGrouper - Intelligent grouping and deduplication
 """
 
 from typing import Dict, List, Set, Tuple, Any, Optional
@@ -430,17 +430,17 @@ class UniversalFileMatcher:
         we extract semantic features once.
         
         Examples:
-            "**/*.nii.gz" → {
+            "**/*.nii.gz" -> {
                 "extension": ".nii.gz",
                 "path_keywords": []
             }
             
-            "**/anat_mprage_anonymized/*.nii.gz" → {
+            "**/anat_mprage_anonymized/*.nii.gz" -> {
                 "path_keywords": ["anat", "mprage", "anonymized"],
                 "extension": ".nii.gz"
             }
             
-            "VHM.*-Head.*\\.dcm" → {
+            "VHM.*-Head.*\\.dcm" -> {
                 "filename_prefix": "vhm",
                 "filename_keywords": ["head"],
                 "extension": ".dcm"
@@ -899,11 +899,11 @@ def test_universal_core():
     """Comprehensive test suite for universal_core"""
     
     print("=" * 80)
-    print("测试 Universal Core 引擎")
+    print("Testing Universal Core Engine")
     print("=" * 80)
     
     # Test 1: FileStructureAnalyzer
-    print("\n[测试 1] FileStructureAnalyzer")
+    print("\n[Test 1] FileStructureAnalyzer")
     print("-" * 80)
     
     test_files_camcan = [
@@ -920,30 +920,30 @@ def test_universal_core():
     
     # Test directory structure analysis
     dir_struct = analyzer.analyze_directory_structure()
-    print(f"✓ 目录结构分析:")
-    print(f"  最大深度: {dir_struct['max_depth']}")
-    print(f"  结构模板: {dir_struct['structure_template']}")
+    print(f"✓ Directory structure analysis:")
+    print(f"  Max depth: {dir_struct['max_depth']}")
+    print(f"  Structure template: {dir_struct['structure_template']}")
     
     # Test subject detection
     subject_detect = analyzer.detect_subject_identifiers(user_hint=3)
-    print(f"\n✓ 被试检测:")
-    print(f"  最佳候选: {subject_detect['best_candidate']['pattern_display']}")
-    print(f"  检测数量: {subject_detect['best_candidate']['count']}")
-    print(f"  置信度: {subject_detect['confidence']}")
-    print(f"  提取 regex: {subject_detect['best_candidate']['extraction_regex']}")
+    print(f"\n✓ Subject detection:")
+    print(f"  Best candidate: {subject_detect['best_candidate']['pattern_display']}")
+    print(f"  Detected count: {subject_detect['best_candidate']['count']}")
+    print(f"  Confidence: {subject_detect['confidence']}")
+    print(f"  Extraction regex: {subject_detect['best_candidate']['extraction_regex']}")
     
-    assert subject_detect['best_candidate']['count'] == 3, "应该检测到3个被试"
-    assert subject_detect['confidence'] == 'high', "应该是高置信度"
+    assert subject_detect['best_candidate']['count'] == 3, "Should detect 3 subjects"
+    assert subject_detect['confidence'] == 'high', "Should be high confidence"
     
     # Test duplicate detection
     duplicates = analyzer.detect_duplicate_filenames()
-    print(f"\n✓ 重复文件检测:")
-    print(f"  重复文件名数: {len(duplicates)}")
+    print(f"\n✓ Duplicate file detection:")
+    print(f"  Duplicate filename count: {len(duplicates)}")
     for fname, paths in list(duplicates.items())[:2]:
-        print(f"  '{fname}': {len(paths)} 个位置")
+        print(f"  '{fname}': {len(paths)} locations")
     
     # Test 2: UniversalFileMatcher
-    print("\n[测试 2] UniversalFileMatcher")
+    print("\n[Test 2] UniversalFileMatcher")
     print("-" * 80)
     
     # Test case 1: Simple extension match
@@ -955,7 +955,7 @@ def test_universal_core():
     test_path1 = "Newark_sub41006/anat_mprage_anonymized/NIfTI/scan.nii.gz"
     match1 = UniversalFileMatcher.match_file(test_path1, features1)
     print(f"Match '{test_path1}': {match1}")
-    assert match1 == True, "应该匹配 .nii.gz 文件"
+    assert match1 == True, "Should match .nii.gz files"
     
     # Test case 2: Path keyword match
     pattern2 = "**/anat_mprage_anonymized/*.nii.gz"
@@ -966,12 +966,12 @@ def test_universal_core():
     test_path2 = "Newark_sub41006/anat_mprage_anonymized/NIfTI/scan_mprage_anonymized.nii.gz"
     match2 = UniversalFileMatcher.match_file(test_path2, features2)
     print(f"Match '{test_path2}': {match2}")
-    assert match2 == True, "应该匹配包含 anat_mprage_anonymized 的路径"
+    assert match2 == True, "Should match path containing anat_mprage_anonymized"
     
     test_path3 = "Newark_sub41006/anat_mprage_skullstripped/NIfTI/scan.nii.gz"
     match3 = UniversalFileMatcher.match_file(test_path3, features2)
     print(f"Match '{test_path3}': {match3}")
-    assert match3 == False, "不应该匹配 skullstripped (关键词不符)"
+    assert match3 == False, "Should not match skullstripped (keyword mismatch)"
     
     # Test case 3: Filename pattern match
     pattern3 = "VHM.*-Head.*\\.dcm"
@@ -982,40 +982,40 @@ def test_universal_core():
     test_path4 = "VHMCT1mm-Head (64).dcm"
     match4 = UniversalFileMatcher.match_file(test_path4, features3)
     print(f"Match '{test_path4}': {match4}")
-    assert match4 == True, "应该匹配 VHM*Head*.dcm"
+    assert match4 == True, "Should match VHM*Head*.dcm"
     
     # Test 3: Batch matching with exclude
-    print("\n[测试 3] 批量匹配与排除")
+    print("\n[Test 3] Batch matching with exclusion")
     print("-" * 80)
     
     patterns = ["**/*.nii.gz"]
     exclude = ["**/BRIK/**"]
     
     matched = UniversalFileMatcher.match_files_batch(test_files_camcan, patterns, exclude)
-    print(f"匹配 {len(matched)} 个文件 (排除 BRIK)")
+    print(f"Matched {len(matched)} files (excluding BRIK)")
     
     brik_count = sum(1 for f in matched if 'BRIK' in f)
-    assert brik_count == 0, "不应该包含 BRIK 文件"
+    assert brik_count == 0, "Should not contain BRIK files"
     
     # Test 4: SmartFileGrouper
-    print("\n[测试 4] SmartFileGrouper")
+    print("\n[Test 4] SmartFileGrouper")
     print("-" * 80)
     
     grouper = SmartFileGrouper(analyzer)
     groups = grouper.group_by_subject_and_scan(test_files_camcan, subject_detect)
     
-    print(f"分组数: {len(groups)}")
+    print(f"Group count: {len(groups)}")
     for group_key, group_data in list(groups.items())[:3]:
-        print(f"\n组: {group_key}")
-        print(f"  被试: {group_data['subject_id']}")
-        print(f"  扫描类型: {group_data['scan_type']}")
-        print(f"  处理状态: {group_data['processing']}")
-        print(f"  文件数: {len(group_data['files'])}")
-        print(f"  首选文件: {group_data['preferred_file'].split('/')[-1]}")
-        print(f"  BIDS文件名: {group_data['bids_filename']}")
+        print(f"\nGroup: {group_key}")
+        print(f"  Subject: {group_data['subject_id']}")
+        print(f"  Scan type: {group_data['scan_type']}")
+        print(f"  Processing: {group_data['processing']}")
+        print(f"  File count: {len(group_data['files'])}")
+        print(f"  Preferred file: {group_data['preferred_file'].split('/')[-1]}")
+        print(f"  BIDS filename: {group_data['bids_filename']}")
     
     print("\n" + "=" * 80)
-    print("✓ 所有测试通过!")
+    print("✓ All tests passed!")
     print("=" * 80)
 
 

@@ -1,12 +1,12 @@
-# executor.py v2
-# Execute LLM's plan using universal_core - completely rewritten for generality
+# executor.py v3
+# Execute LLM's plan - CRITICAL: Use LLM's decisions, don't re-detect!
 
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import shutil
+import re
 from utils import ensure_dir, write_json, write_yaml, copy_file, list_all_files, info, warn
 from converters.mri_convert import run_dcm2niix_batch, check_dcm2niix_available
-from universal_core import FileStructureAnalyzer, UniversalFileMatcher, SmartFileGrouper, build_bids_filename
 
 def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
     """Build ASCII tree visualization"""
@@ -39,26 +39,88 @@ def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
     walk(root)
     return "\n".join(lines)
 
+
+def _match_file_to_subject(filename: str, assignment_rules: List[Dict]) -> Optional[str]:
+    """
+    Match file to subject based on assignment_rules from BIDS Plan.
+    
+    Args:
+        filename: Filename (not full path)
+        assignment_rules: List of rules from plan
+    
+    Returns:
+        Subject ID if matched, None otherwise
+    """
+    for rule in assignment_rules:
+        subject_id = rule.get('subject')
+        prefix = rule.get('prefix')
+        original = rule.get('original')
+        
+        # Method 1: Prefix matching (for flat structures)
+        if prefix and filename.startswith(prefix):
+            return subject_id
+        
+        # Method 2: Original ID matching (for hierarchical)
+        if original and original in filename:
+            return subject_id
+    
+    return None
+
+
+def _extract_bids_entities_from_filename(filename: str, filename_rules: List[Dict]) -> Optional[Dict[str, str]]:
+    """
+    Extract BIDS entities from filename using LLM's filename_rules.
+    
+    Args:
+        filename: Original filename
+        filename_rules: Rules from mapping in BIDS Plan
+    
+    Returns:
+        {
+            "bids_template": "sub-1_acq-cthip_T1w.nii.gz",
+            "entities": {"subject": "1", "acquisition": "cthip"}
+        }
+    """
+    for rule in filename_rules:
+        match_pattern = rule.get('match_pattern', '')
+        
+        # Remove YAML double backslashes
+        pattern_fixed = match_pattern.replace(r'\\', '\\')
+        
+        try:
+            if re.search(pattern_fixed, filename, re.IGNORECASE):
+                return {
+                    "bids_template": rule.get('bids_template'),
+                    "entities": rule.get('extract_entities', {})
+                }
+        except re.error:
+            # If regex fails, try simple string matching
+            keywords = re.findall(r'[A-Za-z]+', match_pattern)
+            if all(kw.lower() in filename.lower() for kw in keywords if len(kw) > 2):
+                return {
+                    "bids_template": rule.get('bids_template'),
+                    "entities": rule.get('extract_entities', {})
+                }
+    
+    return None
+
+
 def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], aux_inputs: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute BIDS plan - v2 using universal_core.
+    Execute BIDS plan v3 - Use LLM's decisions from plan.
     
-    UNIVERSAL SOLUTION:
-    - Works with ANY directory structure
-    - Uses full file path matching
-    - Automatic duplicate handling
-    - Smart format selection (NIfTI over BRIK)
+    CRITICAL CHANGE: Don't re-detect subjects, use LLM's assignment_rules!
     
     Args:
         input_root: Input data directory
         output_dir: Output directory
-        plan: BIDS plan from planner
+        plan: BIDS plan from planner (contains LLM's decisions)
         aux_inputs: Auxiliary inputs
     
     Returns:
         Execution summary
     """
-    info("Executing BIDS Plan (v2: universal matching engine)...")
+    info("Executing BIDS Plan (v3: using LLM's subject grouping)...")
     
     bids_root = Path(output_dir) / "bids_compatible"
     derivatives_dir = bids_root / "derivatives"
@@ -81,123 +143,134 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], 
             shutil.copy2(src, bids_root / trio_file)
             info(f"  ✓ {trio_file}")
     
-    # === Step 2: Process data files ===
-    info("\n[2/3] Processing data files with universal matcher...")
+    # === Step 2: Process data files using LLM's plan ===
+    info("\n[2/3] Processing data files using LLM's grouping rules...")
     
-    # Get all files and their paths
+    # Get all files
     all_files_paths = list_all_files(input_root)
     all_files_str = [str(p.relative_to(input_root)).replace("\\", "/") for p in all_files_paths]
-    
-    # Create Path lookup
     path_str_to_path = {s: p for s, p in zip(all_files_str, all_files_paths)}
     
     info(f"Total files in input: {len(all_files_str)}")
     
-    # Create analyzer for grouping
-    analyzer = FileStructureAnalyzer(all_files_str)
-    subject_detection = analyzer.detect_subject_identifiers()
-    
-    grouper = SmartFileGrouper(analyzer)
-    
+    # CRITICAL: Read LLM's decisions from plan
+    subject_grouping = plan.get("subject_grouping", {})
+    assignment_rules = plan.get("assignment_rules", [])
     mappings = plan.get("mappings", [])
+    
+    grouping_method = subject_grouping.get('method', 'unknown')
+    info(f"  Grouping method from plan: {grouping_method}")
+    info(f"  Assignment rules: {len(assignment_rules)} rules")
+    
+    # DEBUG: Show assignment rules
+    if assignment_rules:
+        info(f"  Subject assignments:")
+        for rule in assignment_rules[:5]:
+            prefix = rule.get('prefix', rule.get('original', 'N/A'))
+            subject = rule.get('subject')
+            info(f"    '{prefix}' -> sub-{subject}")
+        if len(assignment_rules) > 5:
+            info(f"    ... and {len(assignment_rules) - 5} more")
+    else:
+        warn("  ⚠ WARNING: No assignment_rules in plan!")
+        warn("  This will cause all files to be assigned to sub-01")
     
     for mapping_idx, mapping in enumerate(mappings, 1):
         modality = mapping.get("modality")
         patterns = mapping.get("match", [])
         format_ready = mapping.get("format_ready", True)
         convert_to = mapping.get("convert_to", "none")
+        filename_rules = mapping.get("filename_rules", [])
         
         info(f"\n  [{mapping_idx}/{len(mappings)}] Processing {modality} files...")
-        info(f"    Patterns: {patterns}")
+        info(f"    Match patterns: {patterns}")
+        info(f"    Filename rules: {len(filename_rules)} rules")
         
-        # === Use UniversalFileMatcher ===
-        # Auto-exclude BRIK if NIfTI exists
-        exclude_patterns = ["**/BRIK/**", "**/brik/**"]
+        # Simple pattern matching
+        matched_files = []
+        for filepath_str in all_files_str:
+            filename = filepath_str.split('/')[-1]
+            
+            # Check if matches any pattern
+            for pattern in patterns:
+                if pattern == "**/*.dcm" and filename.endswith('.dcm'):
+                    matched_files.append(filepath_str)
+                    break
+                elif pattern == "**/*.nii.gz" and filename.endswith('.nii.gz'):
+                    matched_files.append(filepath_str)
+                    break
         
-        matched_str = UniversalFileMatcher.match_files_batch(
-            all_files_str, 
-            patterns,
-            exclude_patterns
-        )
-        
-        if not matched_str:
-            warn(f"    ⚠ No files matched")
+        if not matched_files:
+            warn(f"    ⚠ No files matched patterns")
             continue
         
-        # Convert back to Path objects
-        matched_paths = [path_str_to_path[s] for s in matched_str if s in path_str_to_path]
+        info(f"    ✓ Matched: {len(matched_files)} files")
         
-        info(f"    ✓ Matched: {len(matched_paths)} files")
+        # Group by subject + entity (using LLM's rules)
+        file_groups = {}
         
-        # === Group files intelligently ===
-        groups = grouper.group_by_subject_and_scan(matched_str, subject_detection)
+        for filepath_str in matched_files:
+            filename = filepath_str.split('/')[-1]
+            
+            # Match to subject
+            subject_id = _match_file_to_subject(filename, assignment_rules)
+            if not subject_id:
+                subject_id = "unknown"
+            
+            # Extract BIDS entities from filename
+            entity_info = _extract_bids_entities_from_filename(filename, filename_rules)
+            
+            if entity_info:
+                bids_template = entity_info['bids_template']
+                group_key = f"{subject_id}_{bids_template}"
+            else:
+                # Fallback: generic grouping
+                group_key = f"{subject_id}_generic"
+                bids_template = f"sub-{subject_id}_unknown.nii.gz"
+            
+            if group_key not in file_groups:
+                file_groups[group_key] = {
+                    'subject_id': subject_id,
+                    'bids_template': bids_template,
+                    'files': [],
+                    'entity_info': entity_info
+                }
+            
+            file_groups[group_key]['files'].append(filepath_str)
         
-        info(f"    Grouped into: {len(groups)} scan groups")
+        info(f"    Grouped into: {len(file_groups)} scan groups")
         
         # === Process each group ===
         if format_ready and convert_to == "none":
-            # Files already in correct format, just organize
+            # Files already in correct format
+            info(f"    Organizing {len(file_groups)} file groups...")
             
-            # Smart logging: show summary instead of every file
-            total_groups = len(groups)
-            info(f"    Processing {total_groups} file groups...")
-            
-            # Show progress every N groups
-            progress_interval = max(1, total_groups // 10)  # Show ~10 progress updates
-            processed = 0
-            
-            for group_key, group_data in groups.items():
+            for group_key, group_data in file_groups.items():
                 try:
-                    preferred_path_str = group_data["preferred_file"]
-                    preferred_path = path_str_to_path.get(preferred_path_str)
+                    # Take first file from group (or could copy all)
+                    filepath_str = group_data['files'][0]
+                    filepath = path_str_to_path.get(filepath_str)
                     
-                    if not preferred_path:
-                        warn(f"      Preferred file not found: {preferred_path_str}")
+                    if not filepath:
                         continue
                     
-                    subject_id = group_data["subject_id"]
-                    bids_filename = group_data["bids_filename"]
-                    scan_type = group_data["scan_type"]
+                    subject_id = group_data['subject_id']
+                    bids_filename = group_data['bids_template']
                     
-                    # Determine subdirectory
-                    if scan_type == "func":
-                        subdir = "func"
-                    elif scan_type == "dwi":
-                        subdir = "dwi"
-                    elif scan_type == "fmap":
-                        subdir = "fmap"
-                    else:
-                        subdir = "anat"
+                    # Determine subdirectory (anat for MRI/CT)
+                    subdir = "anat"
                     
                     dst = bids_root / f"sub-{subject_id}" / subdir / bids_filename
-                    
                     ensure_dir(dst.parent)
-                    copy_file(preferred_path, dst)
-                    
-                    # Copy JSON sidecar if exists
-                    if preferred_path.suffix == '.gz' and preferred_path.stem.endswith('.nii'):
-                        json_src = preferred_path.parent / (preferred_path.stem[:-4] + '.json')
-                    else:
-                        json_src = preferred_path.with_suffix('.json')
-                    
-                    if json_src.exists():
-                        json_dst = dst.parent / (dst.stem.replace('.nii', '') + '.json')
-                        copy_file(json_src, json_dst)
+                    copy_file(filepath, dst)
                     
                     logs.append({
-                        "source": preferred_path_str,
+                        "source": filepath_str,
                         "destination": f"sub-{subject_id}/{subdir}/{bids_filename}",
                         "action": "organize",
-                        "status": "success",
-                        "duplicates_resolved": len(group_data["files"]) > 1
+                        "status": "success"
                     })
                     successes += 1
-                    processed += 1
-                    
-                    # Show progress
-                    if processed % progress_interval == 0 or processed == total_groups:
-                        percent = (processed / total_groups) * 100
-                        info(f"      Progress: {processed}/{total_groups} ({percent:.0f}%)")
                     
                 except Exception as e:
                     warn(f"      Failed: {e}")
@@ -207,33 +280,30 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], 
             # DICOM conversion
             if not check_dcm2niix_available():
                 warn(f"    dcm2niix not available, skipping")
-                failures += len(matched_paths)
+                failures += len(matched_files)
                 continue
             
             temp_base = Path(output_dir) / "_staging" / "dicom_temp"
             
-            total_groups = len(groups)
-            info(f"    Converting {total_groups} DICOM volume groups...")
+            info(f"    Converting {len(file_groups)} DICOM volume groups...")
             
-            progress_interval = max(1, total_groups // 10)
-            processed = 0
+            progress_count = 0
+            progress_interval = max(1, len(file_groups) // 10)
             
-            for group_key, group_data in groups.items():
+            for group_key, group_data in file_groups.items():
                 try:
-                    file_paths_str = group_data["files"]
+                    file_paths_str = group_data['files']
                     file_paths = [path_str_to_path[s] for s in file_paths_str if s in path_str_to_path]
                     
-                    subject_id = group_data["subject_id"]
-                    bids_filename = group_data["bids_filename"]
-                    scan_type = group_data["scan_type"]
+                    subject_id = group_data['subject_id']
+                    bids_filename = group_data['bids_template']
                     
-                    subdir = "anat" if scan_type == "anat" else scan_type
+                    subdir = "anat"
                     output_path = bids_root / f"sub-{subject_id}" / subdir / bids_filename
                     
                     temp_dir = temp_base / group_key
                     ensure_dir(temp_dir)
                     
-                    # Use quiet mode to suppress verbose dcm2niix output
                     result = run_dcm2niix_batch(file_paths, output_path, temp_dir, quiet=True)
                     
                     if result:
@@ -250,12 +320,10 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], 
                     if temp_dir.exists():
                         shutil.rmtree(temp_dir, ignore_errors=True)
                     
-                    processed += 1
-                    
-                    # Show progress
-                    if processed % progress_interval == 0 or processed == total_groups:
-                        percent = (processed / total_groups) * 100
-                        info(f"      Progress: {processed}/{total_groups} ({percent:.0f}%) - Latest: {bids_filename}")
+                    progress_count += 1
+                    if progress_count % progress_interval == 0 or progress_count == len(file_groups):
+                        percent = (progress_count / len(file_groups)) * 100
+                        info(f"      Progress: {progress_count}/{len(file_groups)} ({percent:.0f}%) - Latest: {bids_filename}")
                         
                 except Exception as e:
                     warn(f"      Conversion failed: {e}")
@@ -264,7 +332,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], 
             if temp_base.exists():
                 shutil.rmtree(temp_base, ignore_errors=True)
     
-    # === Step 3: Save outputs ===
+    # === Step 3: Finalize ===
     info("\n[3/3] Finalizing...")
     
     write_json(Path(output_dir) / "_staging" / "conversion_log.json", logs)
