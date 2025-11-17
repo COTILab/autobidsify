@@ -192,7 +192,7 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
 
 
 # ============================================================================
-# Participant Metadata Handling (NEW!)
+# Participant Metadata Handling
 # ============================================================================
 
 def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
@@ -255,7 +255,6 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
         
         lines.append('\t'.join(row) + '\n')
     
-    # 写入文件
     participants_path.write_text(''.join(lines))
     
     info(f"  ✓ Updated participants.tsv with {len(additional_columns)} metadata column(s):")
@@ -520,9 +519,13 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     info(f"Plan location: {plan_path}")
     info(f"Subjects detected: {subject_info.get('subject_count', 0)}")
     
-    if 'participant_metadata' in plan_yaml:
-        metadata_keys = list(list(plan_yaml['participant_metadata'].values())[0].keys())
-        info(f"Participant columns: participant_id, {', '.join(metadata_keys)}")
+    # FIXED: Check if participant_metadata is not None and not empty
+    participant_metadata = plan_yaml.get('participant_metadata')
+    if participant_metadata and isinstance(participant_metadata, dict) and len(participant_metadata) > 0:
+        first_subject_metadata = list(participant_metadata.values())[0]
+        if first_subject_metadata and isinstance(first_subject_metadata, dict):
+            metadata_keys = list(first_subject_metadata.keys())
+            info(f"Participant columns: participant_id, {', '.join(metadata_keys)}")
     
     if 'metadata_provenance' in plan_yaml:
         info(f"Metadata provenance tracking: ✓ enabled")
@@ -532,7 +535,7 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         "warnings": plan_yaml.get("questions", []),
         "questions": [],
         "subject_info": subject_info,
-        "metadata_extracted": 'participant_metadata' in plan_yaml
+        "metadata_extracted": bool(participant_metadata and isinstance(participant_metadata, dict) and len(participant_metadata) > 0)
     }
 
 
