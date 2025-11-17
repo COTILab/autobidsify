@@ -1,5 +1,4 @@
 # converters/planner.py
-# Python-first planning: deterministic extraction + LLM validation
 
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -61,17 +60,7 @@ def _parse_llm_json_response(response_text: str, step_name: str) -> Optional[Dic
 # ============================================================================
 
 def _extract_subjects_from_directory_structure(all_files: List[str]) -> Dict[str, Any]:
-    """
-    Extract subjects from directory structure (hierarchical datasets).
-    
-    Returns:
-        {
-            "success": True/False,
-            "method": "directory_structure",
-            "subject_records": [...],
-            "has_site_info": True/False
-        }
-    """
+    """Extract subjects from directory structure (hierarchical datasets)."""
     patterns = [
         (r'([A-Za-z]+)_sub(\d+)', True, 2, 1, "site_prefixed"),
         (r'sub-(\d+)', False, 1, None, "standard_bids"),
@@ -85,7 +74,7 @@ def _extract_subjects_from_directory_structure(all_files: List[str]) -> Dict[str
     for filepath in all_files:
         parts = filepath.split('/')
         
-        for part in parts[:2]:  # Check first 2 levels
+        for part in parts[:2]:
             for pattern_regex, has_site, id_group, site_group, pattern_name in patterns:
                 match = re.match(pattern_regex, part, re.IGNORECASE)
                 if match:
@@ -124,35 +113,13 @@ def _extract_subjects_from_directory_structure(all_files: List[str]) -> Dict[str
 
 def _extract_subjects_from_flat_filenames(sample_files: List[str], 
                                           filename_analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract subjects and variants from flat structure (all files in one directory).
-    
-    Strategy:
-    1. Use filename_analysis to get dominant prefixes (subjects)
-    2. Extract all variants (body parts, tasks) from sample filenames
-    3. Generate complete filename_rules (prefix × variant combinations)
-    
-    Args:
-        sample_files: Sampled file paths
-        filename_analysis: From evidence bundle
-    
-    Returns:
-        {
-            "success": True/False,
-            "method": "flat_filename",
-            "subject_records": [...],
-            "variants_by_subject": {...},
-            "python_generated_filename_rules": [...]
-        }
-    """
-    # Get dominant prefixes from token analysis
+    """Extract subjects and variants from flat structure."""
     stats = filename_analysis.get('python_statistics', {})
     dominant_prefixes = stats.get('dominant_prefixes', [])
     
     if not dominant_prefixes:
         return {"success": False, "method": "flat_filename"}
     
-    # Create subject records
     subject_records = []
     for i, prefix_info in enumerate(dominant_prefixes, 1):
         prefix = prefix_info['prefix']
@@ -163,13 +130,11 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
             "pattern_name": "filename_prefix"
         })
     
-    # Extract variants from sample filenames
     variants_by_prefix = defaultdict(set)
     
     for filepath in sample_files:
         filename = filepath.split('/')[-1]
         
-        # Match to subject prefix
         matched_prefix = None
         for prefix_info in dominant_prefixes:
             if filename.startswith(prefix_info['prefix']):
@@ -179,26 +144,16 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
         if not matched_prefix:
             continue
         
-        # Extract variant (body part, task, etc.)
-        # Common patterns:
-        # - VHMCT1mm-Hip (134).dcm → "Hip"
-        # - subject01_rest.nii → "rest"
-        # - patient_A_task_motor.nii → "motor"
-        
         variant = None
-        
-        # Pattern 1: Dash-separated (VHMCT1mm-Hip)
         match = re.search(r'-([A-Za-z]+)\s', filename)
         if match:
             variant = match.group(1)
         
-        # Pattern 2: Underscore-separated (subject01_rest)
         if not variant:
             match = re.search(r'_([A-Za-z]+)(?:_|\.)', filename)
             if match:
                 variant = match.group(1)
         
-        # Pattern 3: Common keywords
         if not variant:
             keywords = ['rest', 'task', 'head', 'hip', 'brain', 'shoulder', 'knee', 'ankle', 'pelvis']
             for kw in keywords:
@@ -209,7 +164,6 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
         if variant:
             variants_by_prefix[matched_prefix].add(variant)
     
-    # Generate filename_rules for ALL combinations
     python_generated_rules = []
     
     for i, prefix_info in enumerate(dominant_prefixes, 1):
@@ -238,214 +192,95 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
 
 
 # ============================================================================
-# Main Planning Function
+# Participant Metadata Handling (NEW!)
 # ============================================================================
 
-def build_bids_plan(model: str, planning_inputs: Dict[str, Any], 
-                   out_dir: Path) -> Dict[str, Any]:
-    """Build BIDS plan with Python-first subject detection."""
-    info("=== Generating Unified BIDS Plan ===")
+def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
+    """
+    使用 LLM 提取的 participant_metadata 更新 participants.tsv
     
-    evidence_bundle = planning_inputs.get("evidence_bundle", {})
-    all_files = evidence_bundle.get("all_files", [])
+    包含来源追踪（provenance tracking）
+    """
+    participants_path = out_dir / 'participants.tsv'
+    participant_metadata = plan.get('participant_metadata', {})
+    metadata_provenance = plan.get('metadata_provenance', {})
     
-    staging_dir = out_dir / '_staging'
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    
-    # ========================================================================
-    # STEP 1: Python extracts subjects (deterministic)
-    # ========================================================================
-    info("Step 1: Python extracting subjects...")
-    
-    # Try directory structure first
-    subject_info = _extract_subjects_from_directory_structure(all_files)
-    
-    # If failed, try flat filename extraction
-    if not subject_info["success"]:
-        info("  No subjects in directory structure, trying filename analysis...")
+    if not participant_metadata:
+        info("  No participant metadata in plan")
         
-        filename_analysis = evidence_bundle.get("filename_analysis", {})
-        sample_file_objects = evidence_bundle.get('samples', [])
-        sample_files = [s['relpath'] for s in sample_file_objects]
+        # 检查是否是 insufficient_evidence 情况
+        if metadata_provenance.get('status') == 'insufficient_evidence':
+            info("  ℹ LLM reported: insufficient evidence for metadata extraction")
+            info(f"    Reason: {metadata_provenance.get('reasoning', 'N/A')}")
         
-        subject_info = _extract_subjects_from_flat_filenames(sample_files, filename_analysis)
+        return
     
-    # Report results
-    if subject_info["success"]:
-        info(f"  ✓ Extracted {subject_info['subject_count']} subjects via {subject_info['method']}")
+    # 检查是否已有完整的 participants.tsv
+    if participants_path.exists():
+        existing_content = participants_path.read_text()
+        first_line = existing_content.split('\n')[0]
         
-        # Show variants if available
-        if 'variants_by_subject' in subject_info:
-            for prefix, variants in subject_info['variants_by_subject'].items():
-                info(f"    {prefix}: {len(variants)} variants ({', '.join(variants[:5])}{'...' if len(variants) > 5 else ''})")
+        # 检查是否已包含元数据列
+        existing_columns = set(first_line.split('\t'))
+        new_columns = set(list(list(participant_metadata.values())[0].keys()))
+        
+        if new_columns.issubset(existing_columns):
+            info("  ✓ participants.tsv already contains all metadata columns")
+            return
+        
+        info("  Updating existing participants.tsv with additional metadata columns...")
     else:
-        warn("  ⚠ Python extraction failed, will rely on LLM")
+        info("  Creating participants.tsv with metadata...")
     
-    # Save subject analysis
-    subject_analysis_path = staging_dir / 'subject_analysis.json'
-    write_json(subject_analysis_path, subject_info)
+    # 获取所有列
+    first_subject = list(participant_metadata.values())[0]
+    additional_columns = list(first_subject.keys())
+    columns = ['participant_id'] + additional_columns
     
-    # ========================================================================
-    # STEP 2: Generate participants.tsv (if Python succeeded)
-    # ========================================================================
-    info("Step 2: Generating participants.tsv...")
+    # 生成 TSV 内容
+    lines = ['\t'.join(columns) + '\n']
     
-    if subject_info["success"] and subject_info.get("subject_records"):
-        _generate_participants_tsv_from_python(subject_info, out_dir)
-    else:
-        info("  Deferring to LLM")
+    # 按 subject ID 排序
+    subject_ids = sorted(participant_metadata.keys(), 
+                        key=lambda x: int(x) if x.isdigit() else 0)
     
-    # ========================================================================
-    # STEP 3: Prepare LLM payload
-    # ========================================================================
-    info("Step 3: Preparing LLM payload...")
-    
-    # Use evidence bundle samples
-    sample_file_objects = evidence_bundle.get('samples', [])
-    sample_files = [s['relpath'] for s in sample_file_objects]
-    
-    # Build payload
-    optimized_bundle = {
-        "root": evidence_bundle.get("root"),
-        "counts_by_ext": evidence_bundle.get("counts_by_ext", {}),
-        "user_hints": evidence_bundle.get("user_hints", {}),
-        "file_count": len(all_files),
-        "sample_files": sample_files,
+    for subj_id in subject_ids:
+        metadata = participant_metadata[subj_id]
+        bids_id = f"sub-{subj_id}"
         
-        # Python's analysis results
-        "python_subject_analysis": {
-            "success": subject_info["success"],
-            "method": subject_info.get("method"),
-            "subject_count": subject_info.get("subject_count", 0),
-            "has_site_info": subject_info.get("has_site_info", False),
-            
-            # Sample subject IDs (not all)
-            "subject_examples": [
-                {"original": rec["original_id"], "numeric": rec["numeric_id"]}
-                for rec in subject_info.get("subject_records", [])[:5]
-            ],
-            
-            # Variants extracted by Python
-            "variants": subject_info.get("variants_by_subject", {}),
-            
-            # Pre-generated filename rules (if any)
-            "python_generated_filename_rules": subject_info.get("python_generated_filename_rules", [])
-        }
-    }
-    
-    info(f"  Payload includes {len(subject_info.get('python_generated_filename_rules', []))} Python-generated rules")
-    
-    # ========================================================================
-    # STEP 4: Call LLM (for validation and semantic understanding)
-    # ========================================================================
-    info("Step 4: Calling LLM for validation and semantic analysis...")
-    
-    evidence_json = json.dumps(optimized_bundle, indent=2)
-    plan_response = llm_bids_plan(model, evidence_json)
-    
-    if not plan_response:
-        fatal("LLM failed to generate BIDS plan")
-    
-    try:
-        # Remove markdown fences if present
-        text = plan_response.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
+        row = [bids_id]
+        for col in additional_columns:
+            value = metadata.get(col, 'n/a')
+            row.append(str(value))
         
-        plan_yaml = yaml.safe_load(text.strip())
-    except yaml.YAMLError as e:
-        warn(f"YAML parse error: {e}")
-        fatal("Failed to parse BIDS plan YAML")
+        lines.append('\t'.join(row) + '\n')
     
-    # ========================================================================
-    # STEP 5: Merge Python's results into LLM's plan
-    # ========================================================================
-    info("Step 5: Merging Python analysis into plan...")
+    # 写入文件
+    participants_path.write_text(''.join(lines))
     
-    if subject_info["success"]:
-        # Use Python's subject list (complete)
-        subject_labels = [rec["numeric_id"] for rec in subject_info.get("subject_records", [])]
-        
-        plan_yaml['subjects'] = {
-            'labels': subject_labels,
-            'count': len(subject_labels),
-            'source': 'python_extracted'
-        }
-        
-        # Generate assignment_rules from Python's data
-        plan_yaml['assignment_rules'] = []
-        for rec in subject_info.get("subject_records", []):
-            rule = {
-                'subject': rec["numeric_id"],
-                'original': rec["original_id"],
-                'match': [f"**/{rec['original_id']}*", f"**/{rec['original_id']}/**"]
-            }
-            if rec.get("site"):
-                rule['site'] = rec["site"]
-            
-            plan_yaml['assignment_rules'].append(rule)
-        
-        info(f"  ✓ Added {len(subject_labels)} subjects to plan")
-        
-        # Use Python-generated filename_rules if available
-        python_rules = subject_info.get("python_generated_filename_rules", [])
-        if python_rules:
-            # Find the first mapping and inject Python's rules
-            mappings = plan_yaml.get('mappings', [])
-            if mappings:
-                # Replace or merge filename_rules
-                llm_rules = mappings[0].get('filename_rules', [])
-                
-                if not llm_rules:
-                    # LLM didn't generate rules, use Python's
-                    mappings[0]['filename_rules'] = python_rules
-                    info(f"  ✓ Using {len(python_rules)} Python-generated filename rules")
-                else:
-                    # LLM generated some rules, merge with Python's
-                    # Python's rules are more complete, use them
-                    mappings[0]['filename_rules'] = python_rules
-                    info(f"  ✓ Replaced LLM rules with {len(python_rules)} Python-generated rules")
+    info(f"  ✓ Updated participants.tsv with {len(additional_columns)} metadata column(s):")
+    info(f"    Columns: {', '.join(columns)}")
+    info(f"    Subjects: {len(subject_ids)}")
     
-    # Generate participants.tsv from LLM metadata (if provided)
-    if 'participant_metadata' in plan_yaml and not subject_info.get("has_site_info"):
-        _generate_participants_from_llm_metadata(plan_yaml, out_dir)
+    # 显示元数据来源信息
+    if metadata_provenance:
+        info(f"\n  Metadata provenance information:")
+        for field, prov_info in metadata_provenance.items():
+            if isinstance(prov_info, dict) and 'final_confidence' in prov_info:
+                confidence = prov_info.get('final_confidence', 0)
+                action = prov_info.get('recommended_action', 'unknown')
+                info(f"    {field}: confidence={confidence:.2f}, action={action}")
     
-    # ========================================================================
-    # STEP 6: Add metadata
-    # ========================================================================
-    plan_yaml['metadata'] = {
-        'generated_at': datetime.now().isoformat(),
-        'model': model,
-        'python_analysis': {
-            'method': subject_info.get('method'),
-            'success': subject_info.get('success'),
-            'subject_count': subject_info.get('subject_count', 0)
-        }
-    }
-    
-    # ========================================================================
-    # STEP 7: Save plan
-    # ========================================================================
-    plan_path = staging_dir / BIDS_PLAN
-    write_yaml(plan_path, plan_yaml)
-    info(f"✓ BIDS Plan saved: {plan_path}")
-    
-    if not plan_path.exists():
-        fatal(f"BIDS Plan file was not created at: {plan_path}")
-    
-    return {
-        "warnings": plan_yaml.get("questions", []),
-        "questions": [],
-        "subject_info": subject_info
-    }
+    # 显示前几行预览（如果数据集不大）
+    if len(subject_ids) <= 5:
+        info(f"\n  Content preview:")
+        for line in lines:
+            info(f"    {line.rstrip()}")
 
 
 def _generate_participants_tsv_from_python(subject_info: Dict[str, Any], 
                                             out_dir: Path) -> None:
-    """Generate participants.tsv from Python's subject records."""
+    """Generate basic participants.tsv from Python's subject records."""
     participants_path = out_dir / 'participants.tsv'
     
     if participants_path.exists():
@@ -471,37 +306,234 @@ def _generate_participants_tsv_from_python(subject_info: Dict[str, Any],
         lines.append('\t'.join(row) + '\n')
     
     participants_path.write_text(''.join(lines))
-    info(f"  ✓ Generated participants.tsv ({len(subject_records)} subjects)")
+    info(f"  ✓ Generated participants.tsv (basic version, {len(subject_records)} subjects)")
+    info(f"    Note: Will be updated with metadata in Step 8 if available")
 
 
-def _generate_participants_from_llm_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
-    """Generate participants.tsv from LLM's participant_metadata."""
-    participants_path = out_dir / 'participants.tsv'
+# ============================================================================
+# Main Planning Function
+# ============================================================================
+
+def build_bids_plan(model: str, planning_inputs: Dict[str, Any], 
+                   out_dir: Path) -> Dict[str, Any]:
+    """Build BIDS plan with evidence-based participant metadata extraction."""
+    info("=== Generating Unified BIDS Plan ===")
     
-    if participants_path.exists():
-        return
+    evidence_bundle = planning_inputs.get("evidence_bundle", {})
+    all_files = evidence_bundle.get("all_files", [])
     
-    participant_metadata = plan.get('participant_metadata', {})
-    if not participant_metadata:
-        return
+    staging_dir = out_dir / '_staging'
+    staging_dir.mkdir(parents=True, exist_ok=True)
     
-    first_subject = list(participant_metadata.values())[0]
-    columns = ['participant_id'] + list(first_subject.keys())
+    # ========================================================================
+    # STEP 1: Python extracts subjects (deterministic)
+    # ========================================================================
+    info("Step 1: Python extracting subjects...")
     
-    lines = ['\t'.join(columns) + '\n']
+    subject_info = _extract_subjects_from_directory_structure(all_files)
     
-    for subj_id in sorted(participant_metadata.keys(), key=lambda x: int(x) if x.isdigit() else 0):
-        metadata = participant_metadata[subj_id]
-        bids_id = f"sub-{subj_id}"
+    if not subject_info["success"]:
+        info("  No subjects in directory structure, trying filename analysis...")
         
-        row = [bids_id]
-        for col in columns[1:]:
-            row.append(str(metadata.get(col, 'n/a')))
+        filename_analysis = evidence_bundle.get("filename_analysis", {})
+        sample_file_objects = evidence_bundle.get('samples', [])
+        sample_files = [s['relpath'] for s in sample_file_objects]
         
-        lines.append('\t'.join(row) + '\n')
+        subject_info = _extract_subjects_from_flat_filenames(sample_files, filename_analysis)
     
-    participants_path.write_text(''.join(lines))
-    info(f"  ✓ Generated participants.tsv with metadata")
+    if subject_info["success"]:
+        info(f"  ✓ Extracted {subject_info['subject_count']} subjects via {subject_info['method']}")
+        
+        if 'variants_by_subject' in subject_info:
+            for prefix, variants in subject_info['variants_by_subject'].items():
+                info(f"    {prefix}: {len(variants)} variants ({', '.join(variants[:5])}{'...' if len(variants) > 5 else ''})")
+    else:
+        warn("  ⚠ Python extraction failed, will rely on LLM")
+    
+    subject_analysis_path = staging_dir / 'subject_analysis.json'
+    write_json(subject_analysis_path, subject_info)
+    
+    # ========================================================================
+    # STEP 2: Generate basic participants.tsv
+    # ========================================================================
+    info("\nStep 2: Generating participants.tsv (basic version)...")
+    
+    if subject_info["success"] and subject_info.get("subject_records"):
+        _generate_participants_tsv_from_python(subject_info, out_dir)
+    else:
+        info("  Deferring to LLM")
+    
+    # ========================================================================
+    # STEP 3: Prepare LLM payload (包含多源证据)
+    # ========================================================================
+    info("\nStep 3: Preparing LLM payload with evidence...")
+    
+    sample_file_objects = evidence_bundle.get('samples', [])
+    sample_files = [s['relpath'] for s in sample_file_objects]
+    
+    # NEW: 包含 participant_metadata_evidence
+    participant_evidence = evidence_bundle.get("participant_metadata_evidence", {})
+    evidence_summary = participant_evidence.get("summary", {})
+    
+    info(f"  Evidence types found: {evidence_summary.get('total_evidence_types_found', 0)}/5")
+    for evidence_type in evidence_summary.get('evidence_types', []):
+        info(f"    ✓ {evidence_type}")
+    
+    optimized_bundle = {
+        "root": evidence_bundle.get("root"),
+        "counts_by_ext": evidence_bundle.get("counts_by_ext", {}),
+        "user_hints": evidence_bundle.get("user_hints", {}),
+        "file_count": len(all_files),
+        "sample_files": sample_files,
+        
+        # NEW: 添加完整的 participant metadata 证据
+        "participant_metadata_evidence": participant_evidence,
+        
+        "python_subject_analysis": {
+            "success": subject_info["success"],
+            "method": subject_info.get("method"),
+            "subject_count": subject_info.get("subject_count", 0),
+            "has_site_info": subject_info.get("has_site_info", False),
+            "subject_examples": [
+                {"original": rec["original_id"], "numeric": rec["numeric_id"]}
+                for rec in subject_info.get("subject_records", [])[:5]
+            ],
+            "variants": subject_info.get("variants_by_subject", {}),
+            "python_generated_filename_rules": subject_info.get("python_generated_filename_rules", [])
+        }
+    }
+    
+    info(f"  Payload includes {len(subject_info.get('python_generated_filename_rules', []))} Python-generated rules")
+    
+    # ========================================================================
+    # STEP 4: Call LLM
+    # ========================================================================
+    info("\nStep 4: Calling LLM for plan generation...")
+    
+    evidence_json = json.dumps(optimized_bundle, indent=2)
+    plan_response = llm_bids_plan(model, evidence_json)
+    
+    if not plan_response:
+        fatal("LLM failed to generate BIDS plan")
+    
+    try:
+        text = plan_response.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:])
+        if text.endswith("```"):
+            text = text[:-3]
+        
+        plan_yaml = yaml.safe_load(text.strip())
+    except yaml.YAMLError as e:
+        warn(f"YAML parse error: {e}")
+        fatal("Failed to parse BIDS plan YAML")
+    
+    # ========================================================================
+    # STEP 5: Merge Python's results into plan
+    # ========================================================================
+    info("\nStep 5: Merging Python analysis into plan...")
+    
+    if subject_info["success"]:
+        subject_labels = [rec["numeric_id"] for rec in subject_info.get("subject_records", [])]
+        
+        plan_yaml['subjects'] = {
+            'labels': subject_labels,
+            'count': len(subject_labels),
+            'source': 'python_extracted'
+        }
+        
+        plan_yaml['assignment_rules'] = []
+        for rec in subject_info.get("subject_records", []):
+            rule = {
+                'subject': rec["numeric_id"],
+                'original': rec["original_id"],
+                'match': [f"**/{rec['original_id']}*", f"**/{rec['original_id']}/**"]
+            }
+            if rec.get("site"):
+                rule['site'] = rec["site"]
+            
+            if subject_info.get("method") == "flat_filename":
+                rule['prefix'] = rec["original_id"]
+            
+            plan_yaml['assignment_rules'].append(rule)
+        
+        info(f"  ✓ Added {len(subject_labels)} subjects to plan")
+        
+        python_rules = subject_info.get("python_generated_filename_rules", [])
+        if python_rules:
+            mappings = plan_yaml.get('mappings', [])
+            if mappings:
+                llm_rules = mappings[0].get('filename_rules', [])
+                
+                if not llm_rules:
+                    mappings[0]['filename_rules'] = python_rules
+                    info(f"  ✓ Using {len(python_rules)} Python-generated filename rules")
+                else:
+                    mappings[0]['filename_rules'] = python_rules
+                    info(f"  ✓ Replaced LLM rules with {len(python_rules)} Python-generated rules")
+    
+    # ========================================================================
+    # STEP 6: Add metadata
+    # ========================================================================
+    plan_yaml['metadata'] = {
+        'generated_at': datetime.now().isoformat(),
+        'model': model,
+        'python_analysis': {
+            'method': subject_info.get('method'),
+            'success': subject_info.get('success'),
+            'subject_count': subject_info.get('subject_count', 0)
+        }
+    }
+    
+    # ========================================================================
+    # STEP 7: Save plan
+    # ========================================================================
+    plan_path = staging_dir / BIDS_PLAN
+    write_yaml(plan_path, plan_yaml)
+    info(f"\n✓ BIDS Plan saved: {plan_path}")
+    
+    if not plan_path.exists():
+        fatal(f"BIDS Plan file was not created at: {plan_path}")
+    
+    # ========================================================================
+    # STEP 8: Update participants.tsv with metadata (NEW!)
+    # ========================================================================
+    info("\nStep 8: Updating participants.tsv with LLM-extracted metadata...")
+    
+    if 'participant_metadata' in plan_yaml:
+        _update_participants_with_metadata(plan_yaml, out_dir)
+        info("  ✓ Participant metadata successfully applied")
+    elif 'metadata_provenance' in plan_yaml:
+        # 检查是否是 insufficient_evidence
+        if plan_yaml['metadata_provenance'].get('status') == 'insufficient_evidence':
+            info("  ℹ No metadata extracted (insufficient evidence)")
+        else:
+            info("  ℹ No participant metadata in plan")
+    else:
+        info("  ℹ No participant metadata or provenance information")
+    
+    # ========================================================================
+    # Final summary
+    # ========================================================================
+    info("\n=== BIDS Plan Generation Complete ===")
+    info(f"Plan location: {plan_path}")
+    info(f"Subjects detected: {subject_info.get('subject_count', 0)}")
+    
+    if 'participant_metadata' in plan_yaml:
+        metadata_keys = list(list(plan_yaml['participant_metadata'].values())[0].keys())
+        info(f"Participant columns: participant_id, {', '.join(metadata_keys)}")
+    
+    if 'metadata_provenance' in plan_yaml:
+        info(f"Metadata provenance tracking: ✓ enabled")
+    
+    return {
+        "status": "ok",
+        "warnings": plan_yaml.get("questions", []),
+        "questions": [],
+        "subject_info": subject_info,
+        "metadata_extracted": 'participant_metadata' in plan_yaml
+    }
 
 
 # ============================================================================

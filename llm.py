@@ -182,116 +182,260 @@ Output JSON (ONLY valid JSON):
 }"""
 
 # UPDATED PROMPT with filename token analysis support
+
+# llm.py - 替换现有的 PROMPT_BIDS_PLAN
+
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
-═══════════════════════════════════════════════════════════════════════════
+╔═══════════════════════════════════════════════════════════════════════════╗
 MISSION: Design a complete BIDS conversion plan for ANY neuroimaging dataset
-═══════════════════════════════════════════════════════════════════════════
+╚═══════════════════════════════════════════════════════════════════════════╝
 
 CRITICAL YAML ESCAPING:
 - Use DOUBLE backslashes in regex: \\\\d \\\\w \\\\s (NOT \\d \\w \\s)
 
-INPUT STRUCTURE:
-{
-  "file_count": total_files,
-  "counts_by_ext": {".dcm": 2979, ...},
-  "sample_files": [representative file paths],
+╔═══════════════════════════════════════════════════════════════════════════╗
+PARTICIPANT METADATA EXTRACTION - EVIDENCE-BASED REASONING
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+YOU ARE: A scientific data analyst with expertise in neuroimaging datasets.
+
+YOUR TASK: Infer participant demographic/clinical metadata from available evidence.
+
+CRITICAL PRINCIPLES:
+1. Base conclusions ONLY on evidence provided
+2. Assign confidence levels to each inference
+3. Explain your reasoning chain
+4. When uncertain, leave metadata empty rather than guess
+
+═══════════════════════════════════════════════════════════════════════════
+INPUT STRUCTURE
+═══════════════════════════════════════════════════════════════════════════
+
+participant_metadata_evidence: {
   
-  "user_hints": {
-    "n_subjects": number or null,
-    "user_text": "User's description",
-    "modality_hint": "mri|nirs|mixed"
-  },
-  
-  "subject_summary": {
-    "total_subjects": number (from directory analysis),
-    "pattern_types": ["site_prefixed", ...],
-    "pattern_examples": {...}
-  },
-  
-  "filename_token_analysis": {
-    "total_files": 2979,
-    "dominant_prefixes": [
-      {"prefix": "VHM", "count": 1500, "percentage": 50.4},
-      {"prefix": "VHF", "count": 1479, "percentage": 49.6}
-    ],
-    "token_frequency": {"VHM": 1500, "CT": 2979, ...},
-    "insights": [
-      "Two major prefixes detected: 'VHM' (50.4%) and 'VHF' (49.6%)"
+  // Evidence Type 1: Explicit metadata files
+  "explicit_metadata_files": {
+    "found": true/false,
+    "files": [
+      {"filename": "participants.csv", "path": "...", "extension": ".csv"}
     ]
   },
   
-  "analysis_decision": {
-    "use_filename_analysis": true/false,
-    "path_subjects": number,
-    "filename_subjects": number
+  // Evidence Type 2: DICOM headers
+  "dicom_headers": {
+    "found": true/false,
+    "samples": [
+      {
+        "filename": "scan001.dcm",
+        "PatientSex": "M",
+        "PatientAge": "045Y",
+        "PatientID": "VHM"
+      }
+    ]
+  },
+  
+  // Evidence Type 3: Filename semantic patterns
+  "filename_semantic_patterns": {
+    "found": true/false,
+    "patterns": {
+      "gender_keywords": [
+        {"keyword": "VHM", "filename": "VHMCT1mm-Hip.dcm"}
+      ]
+    }
+  },
+  
+  // Evidence Type 4: Document keywords
+  "document_demographic_keywords": {
+    "found": true/false,
+    "details": [
+      {
+        "document": "protocol.pdf",
+        "found_terms": [
+          {
+            "term": "male",
+            "context_snippet": "The Visible Human Male cadaver..."
+          }
+        ]
+      }
+    ]
+  },
+  
+  // Evidence Type 5: Balanced distribution hint
+  "balanced_prefix_distribution": {
+    "found": true/false,
+    "prefix_1": "VHM",
+    "prefix_1_percentage": 50.4,
+    "prefix_2": "VHF",
+    "prefix_2_percentage": 49.6
   }
 }
 
+user_hints: {
+  "user_text": "Visible Human Project: 1 male cadaver, 1 female cadaver",
+  "n_subjects": 2
+}
+
+python_subject_analysis: {
+  "subject_records": [
+    {"original_id": "VHM", "numeric_id": "1"},
+    {"original_id": "VHF", "numeric_id": "2"}
+  ]
+}
+
 ═══════════════════════════════════════════════════════════════════════════
-CRITICAL: HANDLING FLAT VS HIERARCHICAL STRUCTURES
+REASONING METHODOLOGY
 ═══════════════════════════════════════════════════════════════════════════
 
-SCENARIO 1: Flat structure (all files in one directory)
-  - subject_summary.total_subjects = 0
-  - filename_token_analysis.dominant_prefixes = ["VHM", "VHF"]
-  - analysis_decision.use_filename_analysis = true
+STEP 1: EVALUATE EVIDENCE RELIABILITY
+
+Evidence hierarchy (from most to least reliable):
+
+[TIER 1] explicit_metadata_files + explicit content
+  - participants.csv with columns: sex, age, group
+  - JSON metadata with demographic fields
+  → Confidence: 1.0 (definitive)
+
+[TIER 2] DICOM headers
+  - PatientSex: M/F/O
+  - PatientAge: 034Y
+  → Confidence: 0.9 (medical standard)
+
+[TIER 3] Document statements
+  - Protocol PDF says: "20 male, 20 female participants"
+  - README mentions: "ages 25-65"
+  → Confidence: 0.85 (explicitly stated)
+
+[TIER 4] User-provided text
+  - user_text: "1 male cadaver, 1 female cadaver"
+  → Confidence: 0.8 (direct from user)
+
+[TIER 5] Statistical inference + filename patterns
+  - 50/50 split + keywords like "VHM"/"VHF"
+  - Context clues (e.g., "Visible Human" + gender keywords)
+  → Confidence: 0.6 (reasonable inference)
+
+[TIER 6] Speculation
+  - No evidence, just guessing
+  → Confidence: 0.0 (DO NOT USE)
+
+
+STEP 2: REASONING CHAIN CONSTRUCTION
+
+For EACH piece of metadata (sex, age, group, etc.):
+
+a) List all relevant evidence
+b) Evaluate evidence tier
+c) Check for contradictions
+d) Make inference with confidence
+e) Document reasoning
+
+Example reasoning chain:
+
+Evidence for "sex" metadata:
+  ✓ user_text mentions "1 male, 1 female" [TIER 4: 0.8]
+  ✓ filename_patterns: "VHM" keyword in 50% of files [TIER 5: 0.6]
+  ✓ balanced_distribution: 50.4% vs 49.6% split [TIER 5: 0.6]
+  ✓ document mentions "male cadaver" [TIER 3: 0.85]
   
-  ACTION: Use filename_token_analysis to determine subjects!
-  
-  Example:
-    Filename samples: ["VHMCT1mm-Hip (134).dcm", "VHFCT1mm-Head (89).dcm"]
-    Dominant prefixes: VHM (50%), VHF (50%)
-    User hint: n_subjects = 2
+Synthesis:
+  - Multiple independent evidence sources agree
+  - Highest tier: TIER 3 (document) at 0.85
+  - CONCLUSION: Subject 1 = Male, Subject 2 = Female
+  - FINAL CONFIDENCE: 0.85
+
+
+STEP 3: MAPPING TO SUBJECTS
+
+Use python_subject_analysis to map metadata to subject IDs:
+
+Mapping logic:
+  IF "VHM" appears in evidence AND subject_1 maps to "VHM"
+    → subject "1" gets male metadata
+  IF "VHF" appears in evidence AND subject_2 maps to "VHF"
+    → subject "2" gets female metadata
+
+
+STEP 4: OUTPUT GENERATION
+
+participant_metadata:
+  "1":
+    sex: "M"
+    group: "cadaver"
+  "2":
+    sex: "F"
+    group: "cadaver"
+
+metadata_provenance:
+  sex:
+    evidence_sources:
+      - type: "dicom_headers"
+        tier: 2
+        confidence: 0.9
+        detail: "PatientSex field in DICOM"
+      - type: "documents"
+        tier: 3
+        confidence: 0.85
+        detail: "Protocol mentions male/female"
+      - type: "user_text"
+        tier: 4
+        confidence: 0.8
+        detail: "User stated 'male/female cadaver'"
     
-    CONCLUSION: VHM = subject "1", VHF = subject "2"
+    reasoning_chain: |
+      Step 1: Found 3 independent evidence sources
+      Step 2: All sources agree (no contradictions)
+      Step 3: Highest tier = TIER 2 (DICOM headers)
+      Step 4: Mapped VHM→subject 1→Male, VHF→subject 2→Female
     
-    Output:
-      subject_grouping:
-        method: filename_prefix
-        rules:
-          - prefix: "VHM"
-            maps_to_subject: "1"
-            match_pattern: "VHM.*"
-            metadata:
-              sex: "M"
-          - prefix: "VHF"
-            maps_to_subject: "2"
-            match_pattern: "VHF.*"
-            metadata:
-              sex: "F"
+    final_confidence: 0.9
+    recommended_action: "accept"
 
-SCENARIO 2: Hierarchical structure (subjects have directories)
-  - subject_summary.total_subjects > 0
-  - subject_summary.pattern_types = ["site_prefixed"]
-  - analysis_decision.use_filename_analysis = false
+═══════════════════════════════════════════════════════════════════════════
+CONFIDENCE CALCULATION RULES
+═══════════════════════════════════════════════════════════════════════════
+
+Base confidence = highest tier evidence confidence
+
+Adjustments:
+  + Multiple sources agree: +0.05 (max boost)
+  - Sources contradict: -0.3
+  + Contextual validation: +0.0 to +0.1
   
-  ACTION: Use subject_summary (Python already detected subjects)
-  
-  Example:
-    Pattern examples: ["Cambridge_sub06272", "Beijing_sub82980"]
-    
-    Python already created assignment_rules, just validate them!
+Final confidence bounds: [0.0, 1.0]
+
+Recommended actions:
+  - confidence >= 0.85: "accept" (use directly)
+  - confidence 0.6-0.84: "review" (manual check recommended)
+  - confidence < 0.6: "reject" (do not use)
 
 ═══════════════════════════════════════════════════════════════════════════
-STEP 1: DETERMINE SUBJECT GROUPING METHOD
+HANDLING DIFFERENT SCENARIOS
 ═══════════════════════════════════════════════════════════════════════════
 
-Check analysis_decision.use_filename_analysis:
+Scenario A: Rich evidence (DICOM headers available)
+  → Use PatientSex, PatientAge directly
+  → Confidence: 0.9
+  → Output all available fields
 
-IF TRUE (flat structure):
-  - Analyze filename_token_analysis.dominant_prefixes
-  - Match prefix count with user_hints.n_subjects
-  - Design filename_prefix grouping rules
-  - Extract participant metadata from user_hints.user_text
+Scenario B: Document + user_text convergence
+  → Cross-validate information
+  → Confidence: 0.85
+  → Use highest tier evidence
 
-IF FALSE (hierarchical):
-  - Validate subject_summary.pattern_examples
-  - Python already provided grouping via assignment_rules
-  - Just add participant_metadata if available
+Scenario C: Filename patterns only
+  → Use with caution
+  → Confidence: 0.6
+  → Mark as "review"
+  → Include warning
+
+Scenario D: No evidence
+  → DO NOT generate participant_metadata
+  → Set metadata_provenance.status = "insufficient_evidence"
+  → Explain why
 
 ═══════════════════════════════════════════════════════════════════════════
-CT SCAN HANDLING (unchanged from before)
+CT SCAN HANDLING
 ═══════════════════════════════════════════════════════════════════════════
 
 ✓ For CT scans, ALWAYS use "T1w" suffix
@@ -303,34 +447,46 @@ Example:
   Output: "sub-1_acq-cthip_T1w.nii.gz"
 
 ═══════════════════════════════════════════════════════════════════════════
-OUTPUT STRUCTURE
+OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════════
 
 subject_grouping:
-  method: filename_prefix | directory_based | filename_pattern
+  method: filename_prefix | directory_based
   description: "Explanation"
   rules: [...]
 
+# CRITICAL: Include participant_metadata if evidence exists
 participant_metadata:
   "1":
     sex: "M"
-    group: "cadaver"
-  "2":
-    sex: "F"
+    age: "38"
     group: "cadaver"
 
-standardization:
-  apply: true/false
-  strategy: "..."
-  reason: "..."
+# CRITICAL: Always include metadata_provenance
+metadata_provenance:
+  sex:
+    evidence_sources:
+      - type: "dicom_headers"
+        tier: 2
+        confidence: 0.9
+        detail: "PatientSex field"
+    reasoning_chain: "..."
+    final_confidence: 0.9
+    recommended_action: "accept"
+
+# If insufficient evidence:
+# metadata_provenance:
+#   status: "insufficient_evidence"
+#   reasoning: "No DICOM headers, no demographic keywords found..."
 
 subjects:
   labels: ["1", "2", ...]
 
 assignment_rules:
   - subject: "1"
-    original: "VHM" | "Cambridge_sub06272"
-    match: ["**/VHM*"] | ["**/Cambridge_sub06272/**"]
+    original: "VHM"
+    prefix: "VHM"  # For flat structures
+    match: ["**/VHM*"]
 
 mappings:
   - modality: mri
@@ -343,6 +499,7 @@ mappings:
 
 OUTPUT: Raw YAML only (no markdown fences, no extra text)
 """
+
 
 def llm_classify(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_CLASSIFICATION, payload, "Classification", temperature=0.15)

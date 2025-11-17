@@ -1,5 +1,5 @@
-# evidence.py v2
-# Evidence bundle builder with universal analysis engine + filename tokenizer
+# evidence.py - COMPLETE VERSION with participant metadata evidence collection
+# 在现有 evidence.py 文件末尾添加以下函数，并修改 _build_evidence_bundle_internal()
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -7,7 +7,7 @@ from collections import defaultdict
 from utils import list_all_files, write_json, sha1_head, warn, info, fatal, copy_file, read_json
 from constants import MAX_TEXT_SIZE, MAX_PDF_SIZE, MAX_DOCX_SIZE, MAX_PDF_PAGES
 from universal_core import FileStructureAnalyzer
-from filename_tokenizer import analyze_filenames_for_subjects  # NEW IMPORT
+from filename_tokenizer import analyze_filenames_for_subjects
 import csv
 import re
 
@@ -167,17 +167,6 @@ def _promote_trio_files(data_root: Path, output_dir: Path) -> Dict[str, List[str
 def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]], 
                                 target_samples_per_ext: int = 5,
                                 ensure_full_coverage: bool = False) -> Tuple[List[Path], Dict]:
-    """
-    Intelligently sample files for document extraction.
-    
-    Args:
-        files_by_ext: Files grouped by extension
-        target_samples_per_ext: Target number of samples per extension
-        ensure_full_coverage: If True, sample ALL unique patterns (for flat structures)
-    
-    Returns:
-        (sampled_files, pattern_summary)
-    """
     samples = []
     pattern_summary = {}
     
@@ -186,23 +175,19 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
         
         for filepath in file_list:
             filename = filepath.name
-            # Extract pattern: remove numbers and parentheses
             pattern = re.sub(r'\d+', 'N', filename)
             pattern = re.sub(r'\s*\([^)]*\)', '', pattern)
             pattern_groups[pattern].append(filepath)
         
         n_patterns = len(pattern_groups)
         
-        # CRITICAL: For flat structures, ensure we see ALL patterns
         if ensure_full_coverage:
-            # Take 1 sample from EVERY pattern
             ext_samples = []
             for pattern, files in sorted(pattern_groups.items()):
                 ext_samples.append(files[0])
             
             info(f"  {ext}: Full coverage mode - {len(ext_samples)} patterns sampled")
         else:
-            # Original logic: target samples per extension
             samples_per_pattern = max(1, target_samples_per_ext // n_patterns) if n_patterns > 0 else target_samples_per_ext
             
             ext_samples = []
@@ -211,7 +196,6 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
                 group_samples = files[:n_samples]
                 ext_samples.extend(group_samples)
             
-            # Pad if needed
             if len(ext_samples) < target_samples_per_ext:
                 remaining = target_samples_per_ext - len(ext_samples)
                 large_groups = sorted(pattern_groups.items(), key=lambda x: len(x[1]), reverse=True)
@@ -230,7 +214,6 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
         
         samples.extend(ext_samples)
         
-        # Build pattern info
         pattern_info = []
         for pattern, files in sorted(pattern_groups.items()):
             sampled_count = sum(1 for f in ext_samples if f in files)
@@ -250,6 +233,335 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
     
     return samples, pattern_summary
 
+
+# ============================================================================
+# NEW FUNCTION: Collect participant metadata evidence
+# ============================================================================
+
+def _collect_participant_metadata_evidence(data_root: Path, 
+                                           all_files: List[str],
+                                           documents: List[Dict]) -> Dict[str, Any]:
+    """
+    收集所有可能帮助推断 participant metadata 的证据
+    
+    不做推理，只收集原始证据，让 LLM 做推理
+    
+    Evidence Types:
+    1. Explicit metadata files (participants.csv, etc.)
+    2. DICOM headers (PatientSex, PatientAge, etc.)
+    3. Filename semantic patterns (gender/age keywords)
+    4. Document demographic keywords
+    5. Balanced distribution patterns
+    
+    Args:
+        data_root: 数据根目录
+        all_files: 所有文件的相对路径列表
+        documents: 已提取的文档列表
+    
+    Returns:
+        evidence 字典，包含所有发现的证据
+    """
+    evidence = {}
+    
+    # ========== Evidence Type 1: Explicit metadata files ==========
+    info("  [Evidence 1/5] Scanning for explicit metadata files...")
+    metadata_files = []
+    
+    metadata_patterns = [
+        '**/participants.*', 
+        '**/subjects.*', 
+        '**/metadata.*', 
+        '**/demographics.*', 
+        '**/phenotype.*',
+        '**/participant_data.*',
+        '**/subject_info.*'
+    ]
+    
+    for pattern in metadata_patterns:
+        try:
+            for match in data_root.glob(pattern):
+                if match.is_file() and match.suffix in ['.csv', '.tsv', '.json', '.txt', '.xlsx']:
+                    metadata_files.append({
+                        "filename": match.name,
+                        "path": str(match.relative_to(data_root)),
+                        "extension": match.suffix,
+                        "size_bytes": match.stat().st_size
+                    })
+        except Exception as e:
+            warn(f"    Error scanning pattern {pattern}: {e}")
+            continue
+    
+    if metadata_files:
+        evidence["explicit_metadata_files"] = {
+            "found": True,
+            "count": len(metadata_files),
+            "files": metadata_files,
+            "note": "These files may contain participant demographics"
+        }
+        info(f"    ✓ Found {len(metadata_files)} potential metadata file(s)")
+    else:
+        evidence["explicit_metadata_files"] = {"found": False}
+        info(f"    - No explicit metadata files found")
+    
+    # ========== Evidence Type 2: DICOM headers sampling ==========
+    info("  [Evidence 2/5] Sampling DICOM headers...")
+    dicom_patient_info = []
+    dicom_files = [f for f in all_files if f.lower().endswith('.dcm')]
+    
+    if dicom_files:
+        sample_size = min(20, len(dicom_files))
+        step = max(1, len(dicom_files) // sample_size)
+        sampled_indices = list(range(0, len(dicom_files), step))[:sample_size]
+        sampled_files = [dicom_files[i] for i in sampled_indices]
+        
+        try:
+            import pydicom
+            pydicom_available = True
+        except ImportError:
+            pydicom_available = False
+            warn("    pydicom not installed, skipping DICOM header analysis")
+        
+        if pydicom_available:
+            for dcm_path_str in sampled_files:
+                dcm_path = data_root / dcm_path_str
+                try:
+                    ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True)
+                    
+                    patient_info = {"filename": dcm_path.name}
+                    
+                    dicom_fields = [
+                        ('PatientID', 'PatientID'),
+                        ('PatientSex', 'PatientSex'),
+                        ('PatientAge', 'PatientAge'),
+                        ('PatientName', 'PatientName'),
+                        ('StudyDescription', 'StudyDescription'),
+                        ('PatientBirthDate', 'PatientBirthDate'),
+                        ('PatientWeight', 'PatientWeight')
+                    ]
+                    
+                    for attr_name, field_name in dicom_fields:
+                        try:
+                            value = getattr(ds, attr_name, None)
+                            if value is not None and str(value).strip():
+                                patient_info[field_name] = str(value).strip()
+                        except:
+                            continue
+                    
+                    if len(patient_info) > 1:
+                        dicom_patient_info.append(patient_info)
+                        
+                except Exception:
+                    continue
+        
+        if dicom_patient_info:
+            evidence["dicom_headers"] = {
+                "found": True,
+                "sampled_count": len(dicom_patient_info),
+                "total_dicom_files": len(dicom_files),
+                "samples": dicom_patient_info[:10],
+                "note": "DICOM headers may contain PatientSex, PatientAge, PatientID"
+            }
+            info(f"    ✓ Extracted headers from {len(dicom_patient_info)}/{sample_size} DICOM files")
+        else:
+            evidence["dicom_headers"] = {
+                "found": False,
+                "total_dicom_files": len(dicom_files),
+                "note": "DICOM files exist but no patient info extracted"
+            }
+            info(f"    - DICOM files present ({len(dicom_files)}) but no patient info found")
+    else:
+        evidence["dicom_headers"] = {"found": False}
+        info(f"    - No DICOM files in dataset")
+    
+    # ========== Evidence Type 3: Filename semantic patterns ==========
+    info("  [Evidence 3/5] Analyzing filename semantic patterns...")
+    filename_patterns = {
+        "gender_keywords": [],
+        "age_patterns": [],
+        "group_keywords": []
+    }
+    
+    gender_keywords = [
+        'male', 'female', 'man', 'woman', 'boy', 'girl',
+        '_m_', '_f_', '_m.', '_f.',
+        'VHM', 'VHF',
+        'male_', 'female_',
+        '_male', '_female'
+    ]
+    
+    age_patterns_regex = [
+        r'\d{2}yo',
+        r'\d{2}y\b',
+        r'age\d{2}',
+        r'_\d{2}_',
+        r'y\d{2}',
+    ]
+    
+    group_keywords = [
+        'patient', 'control', 'healthy', 'disease',
+        'hc', 'pt', 'ctrl',
+        'case', 'normal',
+        'treated', 'untreated'
+    ]
+    
+    sample_files_for_pattern = all_files[:200]
+    
+    for filepath in sample_files_for_pattern:
+        filename = filepath.split('/')[-1]
+        filename_lower = filename.lower()
+        
+        for kw in gender_keywords:
+            if kw.lower() in filename_lower:
+                filename_patterns["gender_keywords"].append({
+                    "keyword": kw,
+                    "filename": filename
+                })
+                break
+        
+        for pattern in age_patterns_regex:
+            if re.search(pattern, filename_lower):
+                filename_patterns["age_patterns"].append({
+                    "pattern": pattern,
+                    "filename": filename
+                })
+                break
+        
+        for kw in group_keywords:
+            if kw in filename_lower:
+                filename_patterns["group_keywords"].append({
+                    "keyword": kw,
+                    "filename": filename
+                })
+                break
+    
+    for key in filename_patterns:
+        seen = set()
+        unique_patterns = []
+        for item in filename_patterns[key]:
+            identifier = item.get('keyword') or item.get('pattern')
+            if identifier not in seen:
+                seen.add(identifier)
+                unique_patterns.append(item)
+        filename_patterns[key] = unique_patterns[:10]
+    
+    patterns_found = any(filename_patterns.values())
+    
+    if patterns_found:
+        evidence["filename_semantic_patterns"] = {
+            "found": True,
+            "patterns": filename_patterns,
+            "note": "Filenames may contain demographic keywords"
+        }
+        
+        total_hints = sum(len(v) for v in filename_patterns.values())
+        info(f"    ✓ Found {total_hints} semantic patterns in filenames")
+    else:
+        evidence["filename_semantic_patterns"] = {"found": False}
+        info(f"    - No semantic patterns found in filenames")
+    
+    # ========== Evidence Type 4: Document demographic keywords ==========
+    info("  [Evidence 4/5] Searching documents for demographic keywords...")
+    demographic_keywords_in_docs = []
+    
+    demographic_terms = [
+        'male', 'female', 'sex', 'gender', 'age', 'years old',
+        'patient', 'control', 'healthy', 'diagnosis', 'participants',
+        'subjects', 'volunteers', 'cohort', 'population',
+        'cadaver', 'human', 'adult', 'child'
+    ]
+    
+    for doc in documents:
+        content = doc.get('content', '').lower()
+        doc_name = doc.get('filename', 'unknown')
+        
+        found_terms = []
+        
+        for term in demographic_terms:
+            if term in content:
+                term_index = content.find(term)
+                if term_index != -1:
+                    start = max(0, term_index - 100)
+                    end = min(len(content), term_index + 100)
+                    snippet = content[start:end].strip()
+                    snippet = ' '.join(snippet.split())
+                    
+                    found_terms.append({
+                        "term": term,
+                        "context_snippet": snippet[:200]
+                    })
+        
+        if found_terms:
+            demographic_keywords_in_docs.append({
+                "document": doc_name,
+                "found_terms": found_terms[:5]
+            })
+    
+    if demographic_keywords_in_docs:
+        evidence["document_demographic_keywords"] = {
+            "found": True,
+            "documents_with_keywords": len(demographic_keywords_in_docs),
+            "details": demographic_keywords_in_docs[:5],
+            "note": "Documents mention demographic terms"
+        }
+        info(f"    ✓ Found demographic keywords in {len(demographic_keywords_in_docs)} document(s)")
+    else:
+        evidence["document_demographic_keywords"] = {"found": False}
+        info(f"    - No demographic keywords found in documents")
+    
+    # ========== Evidence Type 5: Balanced distribution ==========
+    info("  [Evidence 5/5] Analyzing subject grouping patterns...")
+    
+    from filename_tokenizer import FilenamePatternAnalyzer
+    
+    filenames = [f.split('/')[-1] for f in all_files]
+    analyzer = FilenamePatternAnalyzer(filenames)
+    stats = analyzer.analyze_token_statistics()
+    
+    dominant_prefixes = stats.get('dominant_prefixes', [])
+    
+    if len(dominant_prefixes) == 2:
+        p1, p2 = dominant_prefixes[0], dominant_prefixes[1]
+        ratio = min(p1['percentage'], p2['percentage']) / max(p1['percentage'], p2['percentage'])
+        
+        if ratio > 0.8:
+            evidence["balanced_prefix_distribution"] = {
+                "found": True,
+                "prefix_1": p1['prefix'],
+                "prefix_1_percentage": p1['percentage'],
+                "prefix_1_count": p1['count'],
+                "prefix_2": p2['prefix'],
+                "prefix_2_percentage": p2['percentage'],
+                "prefix_2_count": p2['count'],
+                "distribution_ratio": round(ratio, 2),
+                "note": "Two balanced groups may indicate gender/group split"
+            }
+            info(f"    ✓ Found balanced distribution: {p1['prefix']} ({p1['percentage']}%) vs {p2['prefix']} ({p2['percentage']}%)")
+        else:
+            evidence["balanced_prefix_distribution"] = {"found": False}
+            info(f"    - Two prefixes found but not balanced ({ratio:.2f})")
+    else:
+        evidence["balanced_prefix_distribution"] = {"found": False}
+        info(f"    - No balanced distribution pattern detected")
+    
+    # ========== Summary ==========
+    evidence_types_found = sum(1 for v in evidence.values() 
+                               if isinstance(v, dict) and v.get('found'))
+    
+    evidence["summary"] = {
+        "total_evidence_types_found": evidence_types_found,
+        "evidence_types": [k for k, v in evidence.items() 
+                          if isinstance(v, dict) and v.get('found')]
+    }
+    
+    info(f"\n  Summary: Found {evidence_types_found}/5 types of evidence")
+    
+    return evidence
+
+
+# ============================================================================
+# MODIFIED: _build_evidence_bundle_internal with evidence collection
+# ============================================================================
+
 def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[int], 
                                      modality_hint: str, user_text: str,
                                      sample_per_ext: int = 5) -> Dict[str, Any]:
@@ -259,9 +571,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
 
     all_file_paths = [str(p.relative_to(root)).replace("\\","/") for p in files]
     
-    # ========================================================================
-    # ANALYSIS 1: Directory structure analysis (existing)
-    # ========================================================================
     info("Analyzing file structure with universal engine...")
     analyzer = FileStructureAnalyzer(all_file_paths)
     
@@ -288,9 +597,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     tree_summary = analyzer.build_directory_tree_summary(max_subjects=50)
     info(f"  Structure summary: {tree_summary['sampled_subjects']}/{tree_summary['total_subjects_detected']} subjects")
     
-    # ========================================================================
-    # ANALYSIS 2: Filename token analysis (NEW!)
-    # ========================================================================
     info("\nAnalyzing filename token patterns...")
     filename_analysis = analyze_filenames_for_subjects(all_file_paths, {
         "n_subjects": user_n_subjects,
@@ -300,16 +606,12 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     info(f"  Token-based analysis: {filename_analysis['confidence']} confidence")
     info(f"  {filename_analysis['recommendation']}")
     
-    # Show dominant prefixes if found
     dominant_prefixes = filename_analysis['python_statistics'].get('dominant_prefixes', [])
     if dominant_prefixes:
         info(f"  Dominant filename prefixes:")
         for p in dominant_prefixes[:5]:
             info(f"    '{p['prefix']}': {p['count']} files ({p['percentage']}%)")
     
-    # ========================================================================
-    # File sampling and document extraction
-    # ========================================================================
     by_ext: Dict[str, List[Path]] = {}
     for p in files:
         key = ".nii.gz" if p.name.lower().endswith(".nii.gz") else p.suffix.lower()
@@ -357,7 +659,20 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         samples.append(entry)
     
     # ========================================================================
-    # Determine final subject count (prioritize filename analysis if better)
+    # CRITICAL: Now that documents are extracted, collect metadata evidence
+    # ========================================================================
+    info("\n=== Collecting Participant Metadata Evidence ===")
+    participant_evidence = _collect_participant_metadata_evidence(
+        data_root=root,
+        all_files=all_file_paths,
+        documents=documents
+    )
+    
+    evidence_count = participant_evidence['summary']['total_evidence_types_found']
+    info(f"\n✓ Evidence collection complete: {evidence_count}/5 types found")
+    
+    # ========================================================================
+    # Determine final subject count
     # ========================================================================
     path_based_count = subject_detection_result["best_candidate"]["count"] if subject_detection_result["best_candidate"] else 0
     path_based_confidence = subject_detection_result["confidence"]
@@ -387,7 +702,7 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         warn("\n⚠ Could not detect subject count from either path or filename, using fallback: 1")
     
     # ========================================================================
-    # Build evidence bundle
+    # Build final evidence bundle
     # ========================================================================
     bundle = {
         "root": str(root),
@@ -405,8 +720,9 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
             "analyzer_confidence": subject_detection_result["confidence"]
         },
         
-        # NEW: Add filename token analysis
         "filename_analysis": filename_analysis,
+        
+        "participant_metadata_evidence": participant_evidence,
         
         "user_hints": {
             "n_subjects": final_count,
@@ -452,6 +768,7 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     info(f"Sampling: {sum(s['total_patterns'] for s in pattern_summary.values())} unique patterns")
     
     return bundle
+
 
 def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     output_dir = Path(output_dir)
