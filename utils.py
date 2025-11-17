@@ -2,21 +2,20 @@
 # Utility functions for file operations, JSON/YAML I/O, and logging.
 
 """
-中文说明：
-通用工具函数模块，提供系统基础功能：
+General utility function module, providing basic system functions
 
-核心功能：
-1. 文件操作：读写JSON/YAML/文本文件
-2. 目录管理：创建目录、复制文件/目录树
-3. 日志输出：带颜色的控制台输出
-4. 哈希计算：文件指纹（用于一致性检查）
-5. 文件扫描：递归列出所有文件
+Core functions:
+1. File operations: Read and write JSON/YAML/text files
+2. Directory management: Create directories, copy files/directory trees
+3. Log output: Colorized console output
+4. Hash calculation: File fingerprint (for consistency checks)
+5. File scanning: Recursively list all files
 
-设计原则：
-- 统一的错误处理
-- UTF-8编码确保跨平台兼容
-- 自动创建父目录
-- 清晰的日志输出
+Design principles:
+- Unified error handling
+- UTF-8 encoding ensures cross-platform compatibility
+- Automatic parent directory creation
+- Clear log putput
 """
 
 import json

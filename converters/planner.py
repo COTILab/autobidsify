@@ -197,9 +197,9 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
 
 def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
     """
-    使用 LLM 提取的 participant_metadata 更新 participants.tsv
+    Use LLM participant_metadata extracted by LLM to update participants.tsv
     
-    包含来源追踪（provenance tracking）
+    including provenance tracking
     """
     participants_path = out_dir / 'participants.tsv'
     participant_metadata = plan.get('participant_metadata', {})
@@ -208,19 +208,19 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     if not participant_metadata:
         info("  No participant metadata in plan")
         
-        # 检查是否是 insufficient_evidence 情况
+        # check whether it's insufficient_evidence
         if metadata_provenance.get('status') == 'insufficient_evidence':
             info("  ℹ LLM reported: insufficient evidence for metadata extraction")
             info(f"    Reason: {metadata_provenance.get('reasoning', 'N/A')}")
         
         return
     
-    # 检查是否已有完整的 participants.tsv
+    # check whether it contains complete participants.tsv
     if participants_path.exists():
         existing_content = participants_path.read_text()
         first_line = existing_content.split('\n')[0]
         
-        # 检查是否已包含元数据列
+        # check whether it contains metadata cols
         existing_columns = set(first_line.split('\t'))
         new_columns = set(list(list(participant_metadata.values())[0].keys()))
         
@@ -232,15 +232,15 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     else:
         info("  Creating participants.tsv with metadata...")
     
-    # 获取所有列
+    # obtain all columns
     first_subject = list(participant_metadata.values())[0]
     additional_columns = list(first_subject.keys())
     columns = ['participant_id'] + additional_columns
     
-    # 生成 TSV 内容
+    # generate TSV
     lines = ['\t'.join(columns) + '\n']
     
-    # 按 subject ID 排序
+    # order in terms of subject ID
     subject_ids = sorted(participant_metadata.keys(), 
                         key=lambda x: int(x) if x.isdigit() else 0)
     
@@ -261,7 +261,7 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     info(f"    Columns: {', '.join(columns)}")
     info(f"    Subjects: {len(subject_ids)}")
     
-    # 显示元数据来源信息
+    # show metadata provenance information
     if metadata_provenance:
         info(f"\n  Metadata provenance information:")
         for field, prov_info in metadata_provenance.items():
@@ -270,7 +270,7 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
                 action = prov_info.get('recommended_action', 'unknown')
                 info(f"    {field}: confidence={confidence:.2f}, action={action}")
     
-    # 显示前几行预览（如果数据集不大）
+    # show first-5-row preview
     if len(subject_ids) <= 5:
         info(f"\n  Content preview:")
         for line in lines:
@@ -363,14 +363,14 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         info("  Deferring to LLM")
     
     # ========================================================================
-    # STEP 3: Prepare LLM payload (包含多源证据)
+    # STEP 3: Prepare LLM payload (inluding multi-source evidence)
     # ========================================================================
     info("\nStep 3: Preparing LLM payload with evidence...")
     
     sample_file_objects = evidence_bundle.get('samples', [])
     sample_files = [s['relpath'] for s in sample_file_objects]
     
-    # NEW: 包含 participant_metadata_evidence
+    # NEW: include participant_metadata_evidence
     participant_evidence = evidence_bundle.get("participant_metadata_evidence", {})
     evidence_summary = participant_evidence.get("summary", {})
     
@@ -385,7 +385,7 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         "file_count": len(all_files),
         "sample_files": sample_files,
         
-        # NEW: 添加完整的 participant metadata 证据
+        # NEW: add complete participant metadata evidence
         "participant_metadata_evidence": participant_evidence,
         
         "python_subject_analysis": {
@@ -504,7 +504,7 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         _update_participants_with_metadata(plan_yaml, out_dir)
         info("  ✓ Participant metadata successfully applied")
     elif 'metadata_provenance' in plan_yaml:
-        # 检查是否是 insufficient_evidence
+        # Check whether is insufficient_evidence
         if plan_yaml['metadata_provenance'].get('status') == 'insufficient_evidence':
             info("  ℹ No metadata extracted (insufficient evidence)")
         else:

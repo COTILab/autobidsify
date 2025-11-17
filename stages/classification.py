@@ -2,33 +2,32 @@
 # LLM-based classification for mixed modality datasets.
 
 """
-中文说明：
-分类模块，用于混合模态数据的智能分流。
+The classification module is used for intelligent sorting of mixed-modal data.
 
-功能特性：
-1. LLM分类：基于文档内容、文件名、元数据进行分类
-2. 三类输出：NIRS文件、MRI文件、不确定文件
-3. 物理分流：将文件复制到独立的pool目录
-4. 证据追溯：记录分类依据和置信度
+Features:
+1. LLM Classification: Classifies documents based on content, filename, and metadata.
+2. Three Output Categories: NIRS files, MRI files, and indeterminate files.
+3. Physical Triage: Copies files to separate pool directories.
+4. Evidence Tracing: Records classification criteria and confidence levels.
 
-工作流程：
-1. 将evidence_bundle发送给LLM（包含完整文档内容）
-2. LLM分析文档中的描述（如"fNIRS optodes"、"3T MRI scanner"）
-3. 根据分析结果生成classification_plan.json
-4. 物理复制文件到nirs_pool和mri_pool
-5. 不确定的文件放入unknown_pool并生成问题
+Workflow:
+1. Send the evidence bundle to LLM (containing complete document content).
+2. LLM analyzes the descriptions in the document (e.g., "fNIRS optodes", "3T MRI scanner").
+3. Generate classification_plan.json based on the analysis results.
+4. Physically copy files to nirs_pool and mri_pool.
+5. Indeterminate files are placed in the unknown_pool and questions are generated.
 
-分类策略：
-- 优先使用文档内容（protocol.pdf提到的模态）
-- 其次使用文件扩展名和路径
-- 最后使用元数据特征（如数组维度）
-- 不确定时标记为unknown并要求用户介入
+Classification Strategy:
+- Prioritize document content (modalities mentioned in protocol.pdf).
+- Secondary use file extensions and paths.
+- Finally, use metadata features (e.g., array dimensions).
+- Mark uncertain files as unknown and require user intervention.
 
-输出文件：
-- classification_plan.json：分类结果和依据
-- _staging/nirs_pool/：NIRS文件池
-- _staging/mri_pool/：MRI文件池
-- _staging/unknown/：不确定文件
+Output Files:
+- classification_plan.json: Classification results and criteria.
+- _staging/nirs_pool/: NIRS file pool
+- _staging/mri_pool/: MRI file pool
+- _staging/unknown/: Unknown files
 """
 
 from pathlib import Path

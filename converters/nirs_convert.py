@@ -2,32 +2,32 @@
 # NIRS format converters: CSV/tables→SNIRF, Homer3 .nirs→SNIRF
 
 """
-中文说明：
-NIRS转换器模块，处理fNIRS数据格式转换和SNIRF文件生成。
+The NIRS converter module handles fNIRS data format conversion and SNIRF file generation.
 
-支持的转换：
-1. Homer3 .nirs → SNIRF（使用MATLAB工具，可选）
-2. CSV/TSV表格 → SNIRF（自定义解析器，核心功能）
-3. SNIRF验证和BIDS侧文件生成
+Supported conversions:
+1. Homer3 .nirs → SNIRF (using MATLAB tools, optional)
+2. CSV/TSV tables → SNIRF (custom parser, core functionality)
+3. SNIRF verification and BIDS-side file generation
 
-CSV到SNIRF转换流程（write_snirf_from_normalized）：
-1. 从normalized_headers读取配置
-2. 读取CSV文件的指定列
-3. 构建dataTimeSeries矩阵（samples × channels）
-4. 创建HDF5文件结构：
-   /nirs/data1/dataTimeSeries
-   /nirs/data1/time
-   /nirs/data1/measurementList/
-   /nirs/probe/wavelengths
-   /nirs/metaDataTags/
-5. 验证SNIRF结构完整性
+CSV to SNIRF conversion process (write_snirf_from_normalized):
 
-关键技术：
-- h5py创建HDF5文件
-- numpy构建数据矩阵
-- CSV解析（支持多种分隔符）
-- 时间单位统一为秒
-- 通道索引从1开始（SNIRF规范）
+1. Read configuration from normalized_headers
+2. Read specified columns from the CSV file
+3. Construct a dataTimeSeries matrix (samples × channels)
+4. Create HDF5 file structure:
+/nirs/data1/dataTimeSeries
+/nirs/data1/time
+/nirs/data1/measurementList/
+/nirs/probe/wavelengths
+/nirs/metaDataTags/
+5. Verify SNIRF structure integrity
+Key technologies:
+- h5py for creating HDF5 files
+- numpy for constructing data matrices
+- CSV parsing (supports multiple delimiters)
+- Time unit is uniformly set to seconds
+- Channel index starts from 1 (SNIRF specification)
+
 """
 
 from pathlib import Path

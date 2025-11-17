@@ -1,5 +1,4 @@
 # evidence.py - COMPLETE VERSION with participant metadata evidence collection
-# 在现有 evidence.py 文件末尾添加以下函数，并修改 _build_evidence_bundle_internal()
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -242,24 +241,24 @@ def _collect_participant_metadata_evidence(data_root: Path,
                                            all_files: List[str],
                                            documents: List[Dict]) -> Dict[str, Any]:
     """
-    收集所有可能帮助推断 participant metadata 的证据
-    
-    不做推理，只收集原始证据，让 LLM 做推理
-    
+    Collect all evidence that may help infer participant metadata.
+    Collect raw evidence without making inferences; let LLM do the reasoning.
+
     Evidence Types:
+
     1. Explicit metadata files (participants.csv, etc.)
     2. DICOM headers (PatientSex, PatientAge, etc.)
     3. Filename semantic patterns (gender/age keywords)
     4. Document demographic keywords
     5. Balanced distribution patterns
-    
+
     Args:
-        data_root: 数据根目录
-        all_files: 所有文件的相对路径列表
-        documents: 已提取的文档列表
-    
+    	data_root: Data root directory
+    	all_files: List of relative paths to all files
+    	documents: List of extracted documents
+
     Returns:
-        evidence 字典，包含所有发现的证据
+    	Evidence dictionary containing all found evidence.
     """
     evidence = {}
     

@@ -1,5 +1,4 @@
 # trio.py
-# BIDS Trio generation with BIDS validation and smart updates
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple

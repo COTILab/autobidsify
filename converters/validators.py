@@ -2,17 +2,21 @@
 # BIDS validation
 
 """
-中文说明：
-验证模块，确保生成的数据集符合BIDS规范。
+This module validates the generated dataset to ensure it conforms to the BIDS specification.
 
-核心功能：
-1. BIDS 结构验证（使用官方 bids-validator 或内置检查）
-2. 必需文件检查（dataset_description.json, README, participants.tsv）
-3. 必需字段验证（Name, License）
+Core Functions:
 
-注意：
-- NIRS 数据在 BIDS 中必须是 SNIRF 格式，所以不需要单独验证 SNIRF
-- 如果是 BIDS 合规的，SNIRF 文件已经符合规范
+1. BIDS Structure Validation (using the official bids-validator or built-in checks)
+
+2. Required File Checks (dataset_description.json, README, participants.tsv)
+
+3. Required Field Validation (Name, License)
+
+Note:
+
+- NIRS data in BIDS must be in SNIRF format, so separate SNIRF validation is not required.
+
+- If BIDS compliant, the SNIRF file already conforms to the specification.
 """
 
 from pathlib import Path

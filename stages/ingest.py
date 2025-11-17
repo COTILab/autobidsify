@@ -3,18 +3,12 @@
 # Optimized: No copying for directory inputs
 
 """
-中文说明：
-数据摄取模块（优化版）
+Data Ingestion Module Workflow:
 
-核心改进：
-- 压缩文件：解压到 output/_staging/extracted
-- 目录输入：不复制，只记录路径（避免大数据集复制时间）
-
-工作流程：
-1. 检测输入类型
-2. 压缩文件 → 解压到 staging
-3. 目录 → 只创建 ingest_info.json，记录原始路径
-4. Evidence 步骤会从 ingest_info 读取实际数据路径
+1. Detect Input Type
+2. Compress File → Decompress to Staging
+3. Directory → Create only ingest_info.json, recording the original path
+4. The Evidence step reads the actual data path from ingest_info.
 """
 
 import zipfile
