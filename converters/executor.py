@@ -1,5 +1,6 @@
-# executor.py v5
+# executor.py v6
 # UNIVERSAL PATH-BASED APPROACH: Everything inferred from full filepath
+# CRITICAL FIX: Use 'match' patterns for subject assignment, not 'original' field
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -7,6 +8,7 @@ import shutil
 import re
 from utils import ensure_dir, write_json, write_yaml, copy_file, list_all_files, info, warn
 from converters.mri_convert import run_dcm2niix_batch, check_dcm2niix_available
+from converters.jnifti_converter import convert_jnifti_to_nifti, check_jnifti_support
 
 
 def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
@@ -41,76 +43,120 @@ def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
     return "\n".join(lines)
 
 
-# ============================================================================
-# UNIVERSAL PATH ANALYZER - Works for ANY dataset structure
-# ============================================================================
+def _match_glob_pattern(filepath: str, pattern: str) -> bool:
+    """
+    Universal glob pattern matcher.
+    
+    Handles:
+    - Simple globs: *.nii, *.dcm
+    - Wildcard globs: *neo*, *1yr*
+    - Path globs: **/sub-01/**, **/anat/*
+    
+    Args:
+        filepath: File path (relative)
+        pattern: Glob pattern
+    
+    Returns:
+        True if filepath matches pattern
+    """
+    # Convert glob to regex-like matching
+    filepath_lower = filepath.lower()
+    pattern_lower = pattern.lower()
+    
+    # Handle ** (match any directory depth)
+    if '**/' in pattern_lower:
+        pattern_lower = pattern_lower.replace('**/', '')
+    
+    # Simple wildcard matching
+    if pattern_lower.startswith('*') and pattern_lower.endswith('*'):
+        # Pattern like '*neo*'
+        token = pattern_lower.strip('*')
+        return token in filepath_lower
+    
+    elif pattern_lower.startswith('*.'):
+        # Pattern like '*.nii'
+        ext = pattern_lower[1:]  # Remove leading *
+        return filepath_lower.endswith(ext)
+    
+    elif pattern_lower.endswith('*'):
+        # Pattern like 'infant-*'
+        prefix = pattern_lower.rstrip('*')
+        filename = filepath.split('/')[-1].lower()
+        return filename.startswith(prefix)
+    
+    else:
+        # Direct substring match
+        return pattern_lower in filepath_lower
+
 
 def analyze_filepath_universal(filepath: str, assignment_rules: List[Dict], 
                                filename_rules: List[Dict]) -> Dict[str, Any]:
     """
     Universal filepath analyzer - extracts ALL information from full path.
     
-    Strategy:
-    1. Extract subject ID from filepath (using assignment_rules)
-    2. Infer scan type from filepath (path keywords + filename)
-    3. Generate BIDS-compliant filename
-    
-    Works for:
-    - Hierarchical: "Site_subID/anat/scan.nii.gz"
-    - Flat: "VHM-Hip-134.dcm"
-    - Mixed: any combination
-    
-    Args:
-        filepath: Full relative path (e.g., "Newark_sub41006/anat_mprage/scan.nii.gz")
-        assignment_rules: Subject assignment rules from plan
-        filename_rules: Filename rules from plan (used as hints)
-    
-    Returns:
-        {
-            "subject_id": "41006",
-            "scan_type_suffix": "acq-anonymized_T1w",
-            "bids_filename": "sub-41006_acq-anonymized_T1w.nii.gz",
-            "subdirectory": "anat",
-            "original_filepath": filepath
-        }
+    CRITICAL FIX: Use 'match' patterns for subject assignment, not 'original'.
     """
     filename = filepath.split('/')[-1]
     path_parts = filepath.split('/')
     
-    # ========== Step 1: Extract subject ID from filepath ==========
     subject_id = None
     
-    # Try assignment_rules first
+    # ===================================================================
+    # PRIMARY MATCHING: Use 'match' patterns (CRITICAL FIX)
+    # ===================================================================
     for rule in assignment_rules:
-        original = rule.get('original')
-        prefix = rule.get('prefix')
+        match_patterns = rule.get('match', [])
         
-        # Check full filepath for original ID (hierarchical structures)
-        if original and original in filepath:
-            subject_id = rule.get('subject')
-            break
+        # Try each match pattern
+        for pattern in match_patterns:
+            if _match_glob_pattern(filepath, pattern):
+                subject_id = rule.get('subject')
+                break
         
-        # Check filename for prefix (flat structures)
-        if prefix and filename.startswith(prefix):
-            subject_id = rule.get('subject')
+        if subject_id:
             break
     
-    # Fallback: try to extract from path parts
+    # ===================================================================
+    # FALLBACK 1: Try 'original' field (for backward compatibility)
+    # ===================================================================
+    if not subject_id:
+        for rule in assignment_rules:
+            original = rule.get('original')
+            
+            if original and original.lower() in filepath.lower():
+                subject_id = rule.get('subject')
+                break
+    
+    # ===================================================================
+    # FALLBACK 2: Try 'prefix' field (for flat structures)
+    # ===================================================================
+    if not subject_id:
+        for rule in assignment_rules:
+            prefix = rule.get('prefix')
+            
+            if prefix and filename.lower().startswith(prefix.lower()):
+                subject_id = rule.get('subject')
+                break
+    
+    # ===================================================================
+    # FALLBACK 3: Try standard BIDS pattern in path
+    # ===================================================================
     if not subject_id:
         for part in path_parts:
-            # Pattern: Site_subID or sub-ID
-            match = re.search(r'sub[_-]?(\d+)', part, re.IGNORECASE)
+            match = re.search(r'sub[_-]?(\w+)', part, re.IGNORECASE)
             if match:
                 subject_id = match.group(1)
                 break
     
+    # ===================================================================
+    # LAST RESORT: Mark as unknown
+    # ===================================================================
     if not subject_id:
         subject_id = "unknown"
     
-    # ========== Step 2: Infer scan type from filepath ==========
+    # Infer scan type
     scan_info = infer_scan_type_from_filepath(filepath, filename_rules)
     
-    # ========== Step 3: Generate BIDS filename ==========
     bids_filename = f"sub-{subject_id}_{scan_info['suffix']}.nii.gz"
     
     return {
@@ -128,46 +174,30 @@ def infer_scan_type_from_filepath(filepath: str,
     """
     Infer BIDS scan type from FULL filepath (path + filename).
     
-    Strategy (in order of priority):
-    1. Try filename_rules first (if LLM provided specific rules)
-    2. Check path keywords (anat, func, dwi, etc.)
-    3. Check processing state (anonymized, skullstripped, etc.)
-    4. Fallback to generic unknown
-    
-    Examples:
-        "Newark_sub41006/anat_mprage_anonymized/NIfTI/scan_mprage_anonymized.nii.gz"
-        → suffix: "acq-anonymized_T1w", subdirectory: "anat"
-        
-        "Berlin_sub06204/func_rest/NIfTI/scan_rest.nii.gz"
-        → suffix: "task-rest_bold", subdirectory: "func"
-        
-        "VHMCT1mm-Hip (134).dcm"
-        → suffix: "acq-cthip_T1w", subdirectory: "anat"
-    
-    Args:
-        filepath: Full relative path
-        filename_rules: LLM's filename rules (used as hints)
-    
-    Returns:
-        {
-            "suffix": BIDS suffix (e.g., "T1w", "task-rest_bold"),
-            "subdirectory": BIDS subdirectory (e.g., "anat", "func"),
-            "category": General category (e.g., "anatomical", "functional")
-        }
+    Strategy:
+    1. Try filename_rules from LLM (most specific)
+    2. Fallback to heuristic detection
     """
     path_lower = filepath.lower()
     filename = filepath.split('/')[-1].lower()
     
-    # ========== Priority 1: Try filename_rules ==========
+    # ===================================================================
+    # PRIMARY: Use LLM-generated filename_rules
+    # ===================================================================
     for rule in filename_rules:
         match_pattern = rule.get('match_pattern', '')
+        
+        # Fix YAML escaping (double backslash -> single)
         pattern_fixed = match_pattern.replace(r'\\', '\\')
         
         try:
             if re.search(pattern_fixed, filename, re.IGNORECASE):
                 template = rule.get('bids_template', '')
-                # Extract suffix from template: "sub-1_acq-cthip_T1w.nii.gz" → "acq-cthip_T1w"
-                suffix_match = re.search(r'sub-\d+_(.*?)\.nii', template)
+                
+                # Extract suffix from template
+                # Template: "sub-X_atlas-aal_T1w.nii.gz"
+                # Extract: "atlas-aal_T1w"
+                suffix_match = re.search(r'sub-[^_]+_(.*?)\.nii', template)
                 if suffix_match:
                     suffix = suffix_match.group(1)
                     subdir = infer_subdirectory_from_suffix(suffix)
@@ -176,14 +206,19 @@ def infer_scan_type_from_filepath(filepath: str,
                         "subdirectory": subdir,
                         "category": categorize_scan_type(suffix)
                     }
-        except:
+        except re.error as e:
+            # Regex error, skip this rule
+            warn(f"    Regex error in pattern '{match_pattern}': {e}")
+            continue
+        except Exception:
             continue
     
-    # ========== Priority 2: Analyze path keywords ==========
+    # ===================================================================
+    # FALLBACK: Heuristic detection
+    # ===================================================================
     
     # Anatomical scans
     if any(kw in path_lower for kw in ['anat', 'mprage', 't1w', 't1 ', '/t1/']):
-        # Check processing state
         if 'anonymized' in path_lower or 'anonymised' in path_lower:
             suffix = "acq-anonymized_T1w"
         elif 'skullstripped' in path_lower or 'skullstrip' in path_lower:
@@ -244,7 +279,6 @@ def infer_scan_type_from_filepath(filepath: str,
     
     # CT scans (special handling)
     elif 'ct' in path_lower or 'ct' in filename:
-        # Extract body part if available
         body_parts = ['hip', 'head', 'shoulder', 'knee', 'ankle', 'pelvis', 'chest', 'abdomen']
         
         for part in body_parts:
@@ -256,7 +290,6 @@ def infer_scan_type_from_filepath(filepath: str,
                     "category": "ct_scan"
                 }
         
-        # Generic CT
         suffix = "acq-ct_T1w"
         return {
             "suffix": suffix,
@@ -264,7 +297,7 @@ def infer_scan_type_from_filepath(filepath: str,
             "category": "ct_scan"
         }
     
-    # Fallback: unknown
+    # Unknown
     else:
         return {
             "suffix": "unknown",
@@ -274,14 +307,7 @@ def infer_scan_type_from_filepath(filepath: str,
 
 
 def infer_subdirectory_from_suffix(suffix: str) -> str:
-    """
-    Infer BIDS subdirectory from suffix.
-    
-    Examples:
-        "T1w" → "anat"
-        "task-rest_bold" → "func"
-        "dwi" → "dwi"
-    """
+    """Infer BIDS subdirectory from suffix."""
     suffix_lower = suffix.lower()
     
     if 't1w' in suffix_lower or 't2w' in suffix_lower or 'flair' in suffix_lower:
@@ -292,6 +318,8 @@ def infer_subdirectory_from_suffix(suffix: str) -> str:
         return "dwi"
     elif 'fieldmap' in suffix_lower or 'epi' in suffix_lower:
         return "fmap"
+    elif 'probseg' in suffix_lower or 'dseg' in suffix_lower:
+        return "anat"  # Segmentation files go to anat
     else:
         return "anat"
 
@@ -308,32 +336,20 @@ def categorize_scan_type(suffix: str) -> str:
         return "diffusion"
     elif 'fieldmap' in suffix_lower:
         return "fieldmap"
+    elif 'probseg' in suffix_lower or 'dseg' in suffix_lower:
+        return "segmentation"
     else:
         return "unknown"
 
 
-# ============================================================================
-# MAIN EXECUTION FUNCTION
-# ============================================================================
-
 def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any], 
                      aux_inputs: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute BIDS plan v5 - UNIVERSAL path-based approach.
+    Execute BIDS plan v6 - UNIVERSAL approach with robust pattern matching.
     
-    Key Innovation: ALL information extracted from full filepath.
-    No separate handling for hierarchical vs flat structures.
-    
-    Args:
-        input_root: Input data directory
-        output_dir: Output directory
-        plan: BIDS plan from planner
-        aux_inputs: Auxiliary inputs
-    
-    Returns:
-        Execution summary
+    CRITICAL FIX: Use 'match' patterns for subject assignment
     """
-    info("Executing BIDS Plan (v5: universal path-based approach)...")
+    info("Executing BIDS Plan (v6: universal pattern matching)...")
     
     bids_root = Path(output_dir) / "bids_compatible"
     derivatives_dir = bids_root / "derivatives"
@@ -344,7 +360,9 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
     successes = 0
     failures = 0
     
-    # === Step 1: Copy trio files ===
+    # ===================================================================
+    # [1/3] Copy trio files
+    # ===================================================================
     info("\n[1/3] Organizing trio files...")
     trio_files = ["dataset_description.json", "README.md", "participants.tsv", "participants.json"]
     
@@ -356,7 +374,9 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
             shutil.copy2(src, bids_root / trio_file)
             info(f"  ✓ {trio_file}")
     
-    # === Step 2: Universal filepath analysis ===
+    # ===================================================================
+    # [2/3] Process data files
+    # ===================================================================
     info("\n[2/3] Analyzing and organizing files...")
     
     all_files_paths = list_all_files(input_root)
@@ -371,15 +391,15 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
     info(f"  Assignment rules: {len(assignment_rules)} subjects")
     
     if assignment_rules:
-        sample_rules = assignment_rules[:3]
-        for rule in sample_rules:
-            original = rule.get('original', rule.get('prefix', 'N/A'))
+        # Display assignment rules for debugging
+        for rule in assignment_rules[:5]:
             subject = rule.get('subject')
-            info(f"    '{original}' → sub-{subject}")
-        if len(assignment_rules) > 3:
-            info(f"    ... and {len(assignment_rules) - 3} more")
+            match_patterns = rule.get('match', [])
+            info(f"    Subject '{subject}': {match_patterns}")
+        if len(assignment_rules) > 5:
+            info(f"    ... and {len(assignment_rules) - 5} more")
     
-    # Process each mapping
+    # Process each mapping (modality)
     for mapping_idx, mapping in enumerate(mappings, 1):
         modality = mapping.get("modality")
         patterns = mapping.get("match", [])
@@ -389,33 +409,28 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
         
         info(f"\n  [{mapping_idx}/{len(mappings)}] Processing {modality} files...")
         
-        # Match files by extension
+        # Match files using mapping patterns
         matched_files = []
         for filepath_str in all_files_str:
-            filename = filepath_str.split('/')[-1]
-            
             for pattern in patterns:
-                if pattern == "**/*.dcm" and filename.endswith('.dcm'):
-                    matched_files.append(filepath_str)
-                    break
-                elif pattern == "**/*.nii.gz" and filename.endswith('.nii.gz'):
+                if _match_glob_pattern(filepath_str, pattern):
                     matched_files.append(filepath_str)
                     break
         
         if not matched_files:
-            warn(f"    ⚠ No files matched")
+            warn(f"    ⚠ No files matched patterns: {patterns}")
             continue
         
         info(f"    ✓ Matched: {len(matched_files)} files")
         
-        # ========== UNIVERSAL ANALYSIS: Analyze each filepath ==========
+        # Analyze each file
         file_analyses = []
         
         for filepath_str in matched_files:
             analysis = analyze_filepath_universal(filepath_str, assignment_rules, filename_rules)
             file_analyses.append(analysis)
         
-        # Group by subject + scan type
+        # Group by subject and scan type
         file_groups = {}
         
         for analysis in file_analyses:
@@ -439,7 +454,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
         
         info(f"    Grouped into: {len(file_groups)} scan groups")
         
-        # Show grouping summary
+        # Calculate subject distribution
         subject_groups = {}
         for group_key, group_data in file_groups.items():
             subj_id = group_data['subject_id']
@@ -450,13 +465,22 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
         
         info(f"    Subject distribution: {unique_subjects} subjects, avg {avg_scans_per_subject:.1f} scan types/subject")
         
-        # Check for unknown subjects
+        # Debug: Show subject breakdown
+        if unique_subjects <= 10:
+            for subj_id in sorted(subject_groups.keys()):
+                count = subject_groups[subj_id]
+                info(f"      sub-{subj_id}: {count} scan types")
+        
         unknown_count = sum(1 for gk in file_groups.keys() if 'unknown' in gk)
         if unknown_count > 0:
             warn(f"    ⚠ {unknown_count} groups with unknown subject ID")
         
-        # === Process each group ===
+        # ===================================================================
+        # Execute based on conversion type
+        # ===================================================================
+        
         if format_ready and convert_to == "none":
+            # Direct copy (already in correct format)
             info(f"    Organizing {len(file_groups)} scan groups...")
             
             progress_count = 0
@@ -497,6 +521,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                     failures += 1
         
         elif not format_ready and convert_to == "dicom_to_nifti":
+            # DICOM to NIfTI conversion
             if not check_dcm2niix_available():
                 warn(f"    dcm2niix not available")
                 failures += len(matched_files)
@@ -550,8 +575,69 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
             
             if temp_base.exists():
                 shutil.rmtree(temp_base, ignore_errors=True)
+        
+        elif not format_ready and convert_to == "jnifti_to_nifti":
+            # JNIfTI to NIfTI conversion
+            if not check_jnifti_support():
+                warn(f"    JNIfTI conversion not available (missing nibabel)")
+                warn(f"    Install with: pip install nibabel")
+                failures += len(matched_files)
+                continue
+            
+            info(f"    Converting {len(file_groups)} JNIfTI files...")
+            
+            progress_count = 0
+            progress_interval = max(1, len(file_groups) // 10) if len(file_groups) > 10 else 1
+            
+            for group_key, group_data in file_groups.items():
+                try:
+                    file_paths_str = group_data['files']
+                    
+                    if not file_paths_str:
+                        failures += 1
+                        continue
+                    
+                    input_path_str = file_paths_str[0]
+                    input_path = path_str_to_path.get(input_path_str)
+                    
+                    if not input_path or not input_path.exists():
+                        warn(f"      File not found: {input_path_str}")
+                        failures += 1
+                        continue
+                    
+                    subject_id = group_data['subject_id']
+                    bids_filename = group_data['bids_filename']
+                    subdirectory = group_data['subdirectory']
+                    
+                    output_path = bids_root / f"sub-{subject_id}" / subdirectory / bids_filename
+                    
+                    result = convert_jnifti_to_nifti(input_path, output_path, quiet=True)
+                    
+                    if result:
+                        logs.append({
+                            "source": input_path_str,
+                            "destination": f"sub-{subject_id}/{subdirectory}/{bids_filename}",
+                            "action": "jnifti_to_nifti",
+                            "status": "success"
+                        })
+                        successes += 1
+                    else:
+                        failures += 1
+                    
+                    progress_count += 1
+                    if progress_count % progress_interval == 0 or progress_count == len(file_groups):
+                        percent = (progress_count / len(file_groups)) * 100
+                        info(f"      Progress: {progress_count}/{len(file_groups)} ({percent:.0f}%)")
+                        
+                except Exception as e:
+                    warn(f"      JNIfTI conversion failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    failures += 1
     
-    # === Step 3: Finalize ===
+    # ===================================================================
+    # [3/3] Finalize
+    # ===================================================================
     info("\n[3/3] Finalizing...")
     
     write_json(Path(output_dir) / "_staging" / "conversion_log.json", logs)
@@ -582,6 +668,11 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
     else:
         warn("⚠ WARNING: No subject directories created!")
         warn("This indicates a problem with subject matching or file processing")
+        
+        # Debug information
+        if assignment_rules:
+            warn("\nDebug: Assignment rules present but no matches found")
+            warn("Check if 'match' patterns in BIDSPlan.yaml are correct")
     
     return {
         "total_mappings": len(mappings),

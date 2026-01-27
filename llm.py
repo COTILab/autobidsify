@@ -66,7 +66,10 @@ def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temp
     except Exception as e:
         raise LLMHardFail(step, "UnexpectedError", str(e))
 
-# Keep existing prompts unchanged
+# ============================================================================
+# PROMPTS
+# ============================================================================
+
 PROMPT_CLASSIFICATION = """You are a neuroimaging data triage expert.
 
 Input: evidence bundle with documents[] containing full protocol text.
@@ -181,325 +184,277 @@ Output JSON (ONLY valid JSON):
   "questions": []
 }"""
 
-# UPDATED PROMPT with filename token analysis support
-
-# llm.py - 替换现有的 PROMPT_BIDS_PLAN
-
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
 ╔═══════════════════════════════════════════════════════════════════════════╗
-MISSION: Design a complete BIDS conversion plan for ANY neuroimaging dataset
+║ MISSION: Design a BIDS conversion plan by analyzing filename patterns    ║
+║          and user descriptions to identify subject groupings              ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 
-CRITICAL YAML ESCAPING:
-- Use DOUBLE backslashes in regex: \\\\d \\\\w \\\\s (NOT \\d \\w \\s)
-
-╔═══════════════════════════════════════════════════════════════════════════╗
-PARTICIPANT METADATA EXTRACTION - EVIDENCE-BASED REASONING
-╚═══════════════════════════════════════════════════════════════════════════╝
-
-YOU ARE: A scientific data analyst with expertise in neuroimaging datasets.
-
-YOUR TASK: Infer participant demographic/clinical metadata from available evidence.
-
-CRITICAL PRINCIPLES:
-1. Base conclusions ONLY on evidence provided
-2. Assign confidence levels to each inference
-3. Explain your reasoning chain
-4. When uncertain, leave metadata empty rather than guess
-
-═══════════════════════════════════════════════════════════════════════════
-INPUT STRUCTURE
-═══════════════════════════════════════════════════════════════════════════
-
-participant_metadata_evidence: {
-  
-  // Evidence Type 1: Explicit metadata files
-  "explicit_metadata_files": {
-    "found": true/false,
-    "files": [
-      {"filename": "participants.csv", "path": "...", "extension": ".csv"}
-    ]
-  },
-  
-  // Evidence Type 2: DICOM headers
-  "dicom_headers": {
-    "found": true/false,
-    "samples": [
-      {
-        "filename": "scan001.dcm",
-        "PatientSex": "M",
-        "PatientAge": "045Y",
-        "PatientID": "VHM"
-      }
-    ]
-  },
-  
-  // Evidence Type 3: Filename semantic patterns
-  "filename_semantic_patterns": {
-    "found": true/false,
-    "patterns": {
-      "gender_keywords": [
-        {"keyword": "VHM", "filename": "VHMCT1mm-Hip.dcm"}
-      ]
-    }
-  },
-  
-  // Evidence Type 4: Document keywords
-  "document_demographic_keywords": {
-    "found": true/false,
-    "details": [
-      {
-        "document": "protocol.pdf",
-        "found_terms": [
-          {
-            "term": "male",
-            "context_snippet": "The Visible Human Male cadaver..."
-          }
-        ]
-      }
-    ]
-  },
-  
-  // Evidence Type 5: Balanced distribution hint
-  "balanced_prefix_distribution": {
-    "found": true/false,
-    "prefix_1": "VHM",
-    "prefix_1_percentage": 50.4,
-    "prefix_2": "VHF",
-    "prefix_2_percentage": 49.6
-  }
-}
-
-user_hints: {
-  "user_text": "Visible Human Project: 1 male cadaver, 1 female cadaver",
-  "n_subjects": 2
-}
-
-python_subject_analysis: {
-  "subject_records": [
-    {"original_id": "VHM", "numeric_id": "1"},
-    {"original_id": "VHF", "numeric_id": "2"}
-  ]
-}
-
-═══════════════════════════════════════════════════════════════════════════
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REASONING METHODOLOGY
-═══════════════════════════════════════════════════════════════════════════
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STEP 1: EVALUATE EVIDENCE RELIABILITY
+Step 1: READ USER DESCRIPTION
+Look for explicit grouping information in user_hints.user_text:
+- Number of groups mentioned
+- Type of grouping (age, condition, timepoint, etc.)
+- Key distinguishing terms
 
-Evidence hierarchy (from most to least reliable):
+Step 2: ANALYZE FILENAME PATTERNS
+Examine sample_files to find discriminative tokens:
+- Look at token_positions to see which position varies
+- Identify tokens that DISTINGUISH different groups
+- Common patterns: age codes (neo, 1yr, 2yr), IDs (001, 002), conditions (pre, post)
 
-[TIER 1] explicit_metadata_files + explicit content
-  - participants.csv with columns: sex, age, group
-  - JSON metadata with demographic fields
-  → Confidence: 1.0 (definitive)
+Step 3: CROSS-VALIDATE
+Compare user description with filename patterns:
+- Do the patterns match the user's description?
+- How many unique discriminative tokens exist?
 
-[TIER 2] DICOM headers
-  - PatientSex: M/F/O
-  - PatientAge: 034Y
-  → Confidence: 0.9 (medical standard)
+Step 4: GENERATE ASSIGNMENT RULES
+Create rules using EXACT tokens from filenames (NOT semantic interpretations)
 
-[TIER 3] Document statements
-  - Protocol PDF says: "20 male, 20 female participants"
-  - README mentions: "ages 25-65"
-  → Confidence: 0.85 (explicitly stated)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: EXACT TOKEN MATCHING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[TIER 4] User-provided text
-  - user_text: "1 male cadaver, 1 female cadaver"
-  → Confidence: 0.8 (direct from user)
+When generating assignment_rules, use the EXACT tokens from sample_files:
 
-[TIER 5] Statistical inference + filename patterns
-  - 50/50 split + keywords like "VHM"/"VHF"
-  - Context clues (e.g., "Visible Human" + gender keywords)
-  → Confidence: 0.6 (reasonable inference)
-
-[TIER 6] Speculation
-  - No evidence, just guessing
-  → Confidence: 0.0 (DO NOT USE)
-
-
-STEP 2: REASONING CHAIN CONSTRUCTION
-
-For EACH piece of metadata (sex, age, group, etc.):
-
-a) List all relevant evidence
-b) Evaluate evidence tier
-c) Check for contradictions
-d) Make inference with confidence
-e) Document reasoning
-
-Example reasoning chain:
-
-Evidence for "sex" metadata:
-  ✓ user_text mentions "1 male, 1 female" [TIER 4: 0.8]
-  ✓ filename_patterns: "VHM" keyword in 50% of files [TIER 5: 0.6]
-  ✓ balanced_distribution: 50.4% vs 49.6% split [TIER 5: 0.6]
-  ✓ document mentions "male cadaver" [TIER 3: 0.85]
+✓ CORRECT (uses actual filename tokens):
+  sample_files: ["infant-neo-aal.nii", "infant-1yr-aal.nii"]
   
-Synthesis:
-  - Multiple independent evidence sources agree
-  - Highest tier: TIER 3 (document) at 0.85
-  - CONCLUSION: Subject 1 = Male, Subject 2 = Female
-  - FINAL CONFIDENCE: 0.85
+  assignment_rules:
+    - subject: 'neo'
+      original: 'neo'           # ← EXACT token from filename
+      match: ['*neo*']
+    - subject: '1yr'
+      original: '1yr'           # ← EXACT token from filename
+      match: ['*1yr*']
 
+✗ WRONG (uses semantic interpretation):
+  assignment_rules:
+    - subject: 'neo'
+      original: 'neonate'       # ← NOT in filenames!
+      match: ['*neo*']          # ← Pattern is right but 'original' is wrong
 
-STEP 3: MAPPING TO SUBJECTS
+WHY THIS MATTERS:
+The executor uses BOTH 'match' and 'original' for matching:
+1. First tries 'match' patterns (glob-style)
+2. Falls back to 'original' (substring search)
 
-Use python_subject_analysis to map metadata to subject IDs:
+Both must contain actual filename tokens, not semantic names!
 
-Mapping logic:
-  IF "VHM" appears in evidence AND subject_1 maps to "VHM"
-    → subject "1" gets male metadata
-  IF "VHF" appears in evidence AND subject_2 maps to "VHF"
-    → subject "2" gets female metadata
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE ANALYSIS WORKFLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+Given input:
+  user_text: "Atlas with 3 age groups: neonates, 1-year-olds, 2-year-olds"
+  sample_files: [
+    "infant-neo-aal.nii",
+    "infant-neo-seg-gm.nii",
+    "infant-1yr-aal.nii",
+    "infant-1yr-seg-gm.nii",
+    "infant-2yr-aal.nii",
+    "infant-2yr-seg-gm.nii"
+  ]
+  token_positions: {
+    "0": {"infant": 27},
+    "1": {"neo": 9, "1": 9, "2": 9}
+  }
 
-STEP 4: OUTPUT GENERATION
+REASONING:
+1. User says "3 age groups" → expect 3 subjects
+2. Position 0: all files have "infant" (common prefix, NOT discriminative)
+3. Position 1: three tokens appear equally (neo=9, 1=9, 2=9)
+4. Position 1 tokens are DISCRIMINATIVE → these define subjects
+5. Actual tokens in files: "neo", "1yr", "2yr" (from sample_files)
 
-participant_metadata:
-  "1":
-    sex: "M"
-    group: "cadaver"
-  "2":
-    sex: "F"
-    group: "cadaver"
-
-metadata_provenance:
-  sex:
-    evidence_sources:
-      - type: "dicom_headers"
-        tier: 2
-        confidence: 0.9
-        detail: "PatientSex field in DICOM"
-      - type: "documents"
-        tier: 3
-        confidence: 0.85
-        detail: "Protocol mentions male/female"
-      - type: "user_text"
-        tier: 4
-        confidence: 0.8
-        detail: "User stated 'male/female cadaver'"
-    
-    reasoning_chain: |
-      Step 1: Found 3 independent evidence sources
-      Step 2: All sources agree (no contradictions)
-      Step 3: Highest tier = TIER 2 (DICOM headers)
-      Step 4: Mapped VHM→subject 1→Male, VHF→subject 2→Female
-    
-    final_confidence: 0.9
-    recommended_action: "accept"
-
-═══════════════════════════════════════════════════════════════════════════
-CONFIDENCE CALCULATION RULES
-═══════════════════════════════════════════════════════════════════════════
-
-Base confidence = highest tier evidence confidence
-
-Adjustments:
-  + Multiple sources agree: +0.05 (max boost)
-  - Sources contradict: -0.3
-  + Contextual validation: +0.0 to +0.1
-  
-Final confidence bounds: [0.0, 1.0]
-
-Recommended actions:
-  - confidence >= 0.85: "accept" (use directly)
-  - confidence 0.6-0.84: "review" (manual check recommended)
-  - confidence < 0.6: "reject" (do not use)
-
-═══════════════════════════════════════════════════════════════════════════
-HANDLING DIFFERENT SCENARIOS
-═══════════════════════════════════════════════════════════════════════════
-
-Scenario A: Rich evidence (DICOM headers available)
-  → Use PatientSex, PatientAge directly
-  → Confidence: 0.9
-  → Output all available fields
-
-Scenario B: Document + user_text convergence
-  → Cross-validate information
-  → Confidence: 0.85
-  → Use highest tier evidence
-
-Scenario C: Filename patterns only
-  → Use with caution
-  → Confidence: 0.6
-  → Mark as "review"
-  → Include warning
-
-Scenario D: No evidence
-  → DO NOT generate participant_metadata
-  → Set metadata_provenance.status = "insufficient_evidence"
-  → Explain why
-
-═══════════════════════════════════════════════════════════════════════════
-CT SCAN HANDLING
-═══════════════════════════════════════════════════════════════════════════
-
-✓ For CT scans, ALWAYS use "T1w" suffix
-✓ Use acquisition label: acq-ct, acq-cthip, acq-cthead
-✗ NEVER use CT, ct, CTscan as modality suffix
-
-Example:
-  Input:  "VHMCT1mm-Hip (134).dcm"
-  Output: "sub-1_acq-cthip_T1w.nii.gz"
-
-═══════════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT
-═══════════════════════════════════════════════════════════════════════════
-
-subject_grouping:
-  method: filename_prefix | directory_based
-  description: "Explanation"
-  rules: [...]
-
-# CRITICAL: Include participant_metadata if evidence exists
-participant_metadata:
-  "1":
-    sex: "M"
-    age: "38"
-    group: "cadaver"
-
-# CRITICAL: Always include metadata_provenance
-metadata_provenance:
-  sex:
-    evidence_sources:
-      - type: "dicom_headers"
-        tier: 2
-        confidence: 0.9
-        detail: "PatientSex field"
-    reasoning_chain: "..."
-    final_confidence: 0.9
-    recommended_action: "accept"
-
-# If insufficient evidence:
-# metadata_provenance:
-#   status: "insufficient_evidence"
-#   reasoning: "No DICOM headers, no demographic keywords found..."
-
+OUTPUT:
 subjects:
-  labels: ["1", "2", ...]
+  labels: ['neo', '1yr', '2yr']  # Use actual tokens
+  count: 3
 
 assignment_rules:
-  - subject: "1"
-    original: "VHM"
-    prefix: "VHM"  # For flat structures
-    match: ["**/VHM*"]
+  - subject: 'neo'
+    original: 'neo'        # ← EXACT token
+    match: ['*neo*']
+  - subject: '1yr'
+    original: '1yr'        # ← EXACT token (includes 'yr')
+    match: ['*1yr*']
+  - subject: '2yr'
+    original: '2yr'        # ← EXACT token (includes 'yr')
+    match: ['*2yr*']
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMMON PATTERNS AND HOW TO HANDLE THEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Pattern 1: Age/Condition Groups (Flat structure)
+─────────────────────────────────────────────────
+Files: template-young-*.nii, template-old-*.nii
+→ 2 subjects: 'young' and 'old'
+→ Use exact tokens: original: 'young', match: ['*young*']
+
+Pattern 2: Numeric Patient IDs
+───────────────────────────────
+Files: patient001-T1.nii, patient002-T1.nii
+→ Many subjects (001, 002, ...)
+→ Use exact IDs: original: '001', match: ['*001*']
+
+Pattern 3: Site-Subject Structure
+──────────────────────────────────
+Files: Beijing_sub001/anat/scan.nii
+→ Directory-based
+→ Use directory: original: 'Beijing_sub001', match: ['**/Beijing_sub001/**']
+
+Pattern 4: Single Template/Atlas
+─────────────────────────────────
+Files: MNI152_T1_1mm.nii, MNI152_T1_2mm.nii
+→ 1 subject (different resolutions of same template)
+→ Use template name: original: 'MNI152', match: ['*MNI152*']
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+subjects:
+  labels: [list of subject IDs using EXACT filename tokens]
+  count: total number
+  source: llm_analysis
+
+assignment_rules:
+  - subject: 'exact_token'     # Subject ID (from filename)
+    original: 'exact_token'    # MUST be exact token from filename
+    match: ['*exact_token*']   # Glob pattern using same token
 
 mappings:
   - modality: mri
-    match: ["**/*.dcm"]
-    format_ready: false
-    convert_to: "dicom_to_nifti"
+    match: ['*.nii', '*.nii.gz', '**/*.nii', '**/*.nii.gz']
+    format_ready: true
+    convert_to: none
     filename_rules:
-      - match_pattern: "VHM.*-Hip.*\\\\.dcm"
-        bids_template: "sub-1_acq-cthip_T1w.nii.gz"
+      - match_pattern: '.*pattern.*'
+        bids_template: 'sub-SUBJECTID_suffix.nii.gz'
+
+CRITICAL RULES:
+1. 'original' field = EXACT token from actual filenames
+2. 'match' patterns = glob patterns using SAME exact token
+3. Use 'sub-X' in bids_template where X will be replaced with subject ID
+4. mappings.match must include BOTH root and nested patterns:
+   ['*.nii', '**/*.nii'] not just ['**/*.nii']
 
 OUTPUT: Raw YAML only (no markdown fences, no extra text)
+
+Now analyze the evidence and generate the plan.
 """
 
+
+PROMPT_NIRS_DRAFT = """fNIRS-to-SNIRF mapper (Draft).
+
+Output JSON (ONLY valid JSON):
+{
+  "draft": {...},
+  "confidence": 0.8,
+  "questions": [...]
+}"""
+
+PROMPT_NIRS_NORMALIZE = """fNIRS-to-SNIRF mapper (Normalize).
+
+Output JSON (ONLY valid JSON):
+{
+  "normalized": {...},
+  "questions": [...]
+}"""
+
+PROMPT_MRI_VOXEL_DRAFT = """MRI voxelization planner (Draft).
+
+Output JSON (ONLY valid JSON):
+{
+  "volume_candidates": [...],
+  "meta_candidates": {...},
+  "confidence": 0.8
+}"""
+
+PROMPT_MRI_VOXEL_FINAL = """MRI voxelization planner (Final).
+
+Output JSON (ONLY valid JSON):
+{
+  "conversions": [...],
+  "questions": []
+}"""
+
+PROMPT_TRIO_DATASET_DESC = """You are a BIDS dataset_description.json generator.
+
+CRITICAL: Use user_hints.user_text to extract dataset information!
+
+CRITICAL RULES:
+- Authors MUST be array: ["Name 1", "Name 2", "Name 3"]
+- Funding MUST be array
+- EthicsApprovals MUST be array
+- DO NOT include empty strings "" or empty arrays []
+- License normalization: "CC BY 4.0" -> "CC-BY-4.0"
+
+Extract from user_hints.user_text:
+- Dataset name
+- Authors/institutions mentioned
+- Funding sources
+- License information (default to PD for public domain datasets)
+
+Input: {existing, documents, user_hints, counts_by_ext}
+
+Output JSON (ONLY valid JSON, no extra text):
+{
+  "action": "create|update",
+  "dataset_description": {
+    "Name": "...",
+    "BIDSVersion": "1.10.0",
+    "DatasetType": "raw",
+    "License": "PD",
+    "Authors": ["Institution or Author Name"]
+  },
+  "extraction_log": {...},
+  "questions": []
+}"""
+
+PROMPT_TRIO_README = """Generate README.md for BIDS dataset.
+
+CRITICAL: Use user_hints.user_text as primary source for README content.
+
+Create comprehensive README with sections:
+- Overview
+- Dataset Description  
+- Data Acquisition
+- File Organization
+- Usage Notes
+- References
+
+Output: Direct Markdown text (no JSON wrapper)"""
+
+PROMPT_TRIO_PARTICIPANTS = """You are a BIDS participants.tsv generator.
+
+CRITICAL: Extract participant metadata from user_hints.user_text!
+
+Examples:
+- "1 male, 1 female" → sex column: M, F
+- "ages 25-65" → age column
+- "patients and controls" → group column
+
+Return column structure (Python will generate rows):
+
+Output JSON:
+{
+  "columns": [
+    {"name": "participant_id", "required": true},
+    {"name": "sex", "levels": ["M", "F"]},
+    {"name": "group", "levels": ["patient", "control"]}
+  ]
+}"""
+
+# ============================================================================
+# LLM CALL FUNCTIONS
+# ============================================================================
 
 def llm_classify(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_CLASSIFICATION, payload, "Classification", temperature=0.15)

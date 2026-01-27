@@ -3,7 +3,7 @@
 # Translated from MATLAB jnii2nii.m (NeuroJSON/jnifty)
 
 """
-JNIfTI to NIfTI Converter - Pure Python Implementation
+JNIfTI to NIfTI Converter - Python Implementation
 
 Converts JNIfTI files (.jnii for text JSON, .bnii for binary JSON) to NIfTI format.
 
@@ -21,11 +21,10 @@ Installation:
     pip install nibabel numpy bjdata
 
 Original MATLAB implementation: https://github.com/NeuroJSON/jnifty/blob/master/jnii2nii.m
-License: Apache 2.0
 """
 
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 import json
 import numpy as np
 import nibabel as nib

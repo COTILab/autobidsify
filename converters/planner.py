@@ -1,4 +1,5 @@
 # converters/planner.py
+# MODIFIED: Added JNIfTI detection and LLM hint support
 
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -11,7 +12,6 @@ from utils import write_json, read_json, write_yaml, info, warn, fatal, write_te
 from constants import SEVERITY_BLOCK
 from llm import llm_nirs_draft, llm_nirs_normalize, llm_mri_voxel_draft, llm_mri_voxel_final, llm_bids_plan
 
-# Local constants
 HEADERS_DRAFT = "nirs_headers_draft.json"
 HEADERS_NORMALIZED = "nirs_headers_normalized.json"
 VOXEL_DRAFT = "mri_voxel_draft.json"
@@ -54,10 +54,6 @@ def _parse_llm_json_response(response_text: str, step_name: str) -> Optional[Dic
         warn(f"Preview: {text[:500]}...")
         return None
 
-
-# ============================================================================
-# Python-First Subject Detection
-# ============================================================================
 
 def _extract_subjects_from_directory_structure(all_files: List[str]) -> Dict[str, Any]:
     """Extract subjects from directory structure (hierarchical datasets)."""
@@ -191,16 +187,8 @@ def _extract_subjects_from_flat_filenames(sample_files: List[str],
     }
 
 
-# ============================================================================
-# Participant Metadata Handling
-# ============================================================================
-
 def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
-    """
-    Use LLM participant_metadata extracted by LLM to update participants.tsv
-    
-    including provenance tracking
-    """
+    """Update participants.tsv with LLM-extracted metadata."""
     participants_path = out_dir / 'participants.tsv'
     participant_metadata = plan.get('participant_metadata', {})
     metadata_provenance = plan.get('metadata_provenance', {})
@@ -208,19 +196,16 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     if not participant_metadata:
         info("  No participant metadata in plan")
         
-        # check whether it's insufficient_evidence
         if metadata_provenance.get('status') == 'insufficient_evidence':
             info("  ℹ LLM reported: insufficient evidence for metadata extraction")
             info(f"    Reason: {metadata_provenance.get('reasoning', 'N/A')}")
         
         return
     
-    # check whether it contains complete participants.tsv
     if participants_path.exists():
         existing_content = participants_path.read_text()
         first_line = existing_content.split('\n')[0]
         
-        # check whether it contains metadata cols
         existing_columns = set(first_line.split('\t'))
         new_columns = set(list(list(participant_metadata.values())[0].keys()))
         
@@ -232,15 +217,12 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     else:
         info("  Creating participants.tsv with metadata...")
     
-    # obtain all columns
     first_subject = list(participant_metadata.values())[0]
     additional_columns = list(first_subject.keys())
     columns = ['participant_id'] + additional_columns
     
-    # generate TSV
     lines = ['\t'.join(columns) + '\n']
     
-    # order in terms of subject ID
     subject_ids = sorted(participant_metadata.keys(), 
                         key=lambda x: int(x) if x.isdigit() else 0)
     
@@ -261,7 +243,6 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
     info(f"    Columns: {', '.join(columns)}")
     info(f"    Subjects: {len(subject_ids)}")
     
-    # show metadata provenance information
     if metadata_provenance:
         info(f"\n  Metadata provenance information:")
         for field, prov_info in metadata_provenance.items():
@@ -270,7 +251,6 @@ def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> N
                 action = prov_info.get('recommended_action', 'unknown')
                 info(f"    {field}: confidence={confidence:.2f}, action={action}")
     
-    # show first-5-row preview
     if len(subject_ids) <= 5:
         info(f"\n  Content preview:")
         for line in lines:
@@ -309,13 +289,14 @@ def _generate_participants_tsv_from_python(subject_info: Dict[str, Any],
     info(f"    Note: Will be updated with metadata in Step 8 if available")
 
 
-# ============================================================================
-# Main Planning Function
-# ============================================================================
-
 def build_bids_plan(model: str, planning_inputs: Dict[str, Any], 
                    out_dir: Path) -> Dict[str, Any]:
-    """Build BIDS plan with evidence-based participant metadata extraction."""
+    """
+    Build BIDS plan with LLM-first decision making.
+    
+    CRITICAL CHANGE: When LLM and Python disagree on subject count,
+    trust LLM by default (it has full context including user description).
+    """
     info("=== Generating Unified BIDS Plan ===")
     
     evidence_bundle = planning_inputs.get("evidence_bundle", {})
@@ -324,9 +305,7 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     staging_dir = out_dir / '_staging'
     staging_dir.mkdir(parents=True, exist_ok=True)
     
-    # ========================================================================
-    # STEP 1: Python extracts subjects (deterministic)
-    # ========================================================================
+    # Step 1: Python analysis (提供统计数据)
     info("Step 1: Python extracting subjects...")
     
     subject_info = _extract_subjects_from_directory_structure(all_files)
@@ -340,21 +319,19 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         
         subject_info = _extract_subjects_from_flat_filenames(sample_files, filename_analysis)
     
-    if subject_info["success"]:
-        info(f"  ✓ Extracted {subject_info['subject_count']} subjects via {subject_info['method']}")
-        
-        if 'variants_by_subject' in subject_info:
-            for prefix, variants in subject_info['variants_by_subject'].items():
-                info(f"    {prefix}: {len(variants)} variants ({', '.join(variants[:5])}{'...' if len(variants) > 5 else ''})")
-    else:
-        warn("  ⚠ Python extraction failed, will rely on LLM")
+    python_subject_count = subject_info.get("subject_count", 0)
+    python_confidence = subject_info.get("success", False)
     
+    if subject_info["success"]:
+        info(f"  ✓ Python extracted {python_subject_count} subjects via {subject_info['method']}")
+    else:
+        warn("  ⚠ Python extraction failed")
+    
+    # 保存 Python 分析结果（供调试）
     subject_analysis_path = staging_dir / 'subject_analysis.json'
     write_json(subject_analysis_path, subject_info)
     
-    # ========================================================================
-    # STEP 2: Generate basic participants.tsv
-    # ========================================================================
+    # Step 2: 生成基础 participants.tsv（如果需要）
     info("\nStep 2: Generating participants.tsv (basic version)...")
     
     if subject_info["success"] and subject_info.get("subject_records"):
@@ -362,51 +339,64 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     else:
         info("  Deferring to LLM")
     
-    # ========================================================================
-    # STEP 3: Prepare LLM payload (inluding multi-source evidence)
-    # ========================================================================
+    # Step 3: 准备 LLM payload
     info("\nStep 3: Preparing LLM payload with evidence...")
     
     sample_file_objects = evidence_bundle.get('samples', [])
     sample_files = [s['relpath'] for s in sample_file_objects]
     
-    # NEW: include participant_metadata_evidence
     participant_evidence = evidence_bundle.get("participant_metadata_evidence", {})
     evidence_summary = participant_evidence.get("summary", {})
     
     info(f"  Evidence types found: {evidence_summary.get('total_evidence_types_found', 0)}/5")
-    for evidence_type in evidence_summary.get('evidence_types', []):
-        info(f"    ✓ {evidence_type}")
     
+    # Detect JNIfTI files
+    counts_by_ext = evidence_bundle.get("counts_by_ext", {})
+    jnifti_count = counts_by_ext.get('.jnii', 0) + counts_by_ext.get('.bnii', 0)
+    
+    if jnifti_count > 0:
+        info(f"  Detected {jnifti_count} JNIfTI files (.jnii/.bnii)")
+    
+    # Build optimized payload
     optimized_bundle = {
         "root": evidence_bundle.get("root"),
-        "counts_by_ext": evidence_bundle.get("counts_by_ext", {}),
+        "counts_by_ext": counts_by_ext,
         "user_hints": evidence_bundle.get("user_hints", {}),
         "file_count": len(all_files),
         "sample_files": sample_files,
         
-        # NEW: add complete participant metadata evidence
+        "jnifti_hint": {
+            "count": jnifti_count,
+            "requires_conversion": jnifti_count > 0,
+            "target_format": "nifti",
+            "note": "JNIfTI files must be converted to NIfTI before BIDS compliance"
+        } if jnifti_count > 0 else None,
+        
         "participant_metadata_evidence": participant_evidence,
         
+        # CRITICAL: Python 分析作为参考，不强制使用
         "python_subject_analysis": {
             "success": subject_info["success"],
             "method": subject_info.get("method"),
-            "subject_count": subject_info.get("subject_count", 0),
+            "subject_count": python_subject_count,
+            "confidence": "high" if python_confidence and python_subject_count > 1 else "low",
             "has_site_info": subject_info.get("has_site_info", False),
             "subject_examples": [
                 {"original": rec["original_id"], "numeric": rec["numeric_id"]}
                 for rec in subject_info.get("subject_records", [])[:5]
             ],
             "variants": subject_info.get("variants_by_subject", {}),
-            "python_generated_filename_rules": subject_info.get("python_generated_filename_rules", [])
+            "python_generated_filename_rules": subject_info.get("python_generated_filename_rules", []),
+            # NEW: 标记这只是建议
+            "note": "This is Python's statistical analysis. LLM should validate with full context."
         }
     }
     
-    info(f"  Payload includes {len(subject_info.get('python_generated_filename_rules', []))} Python-generated rules")
+    info(f"  Python suggests {python_subject_count} subjects (confidence: {'high' if python_confidence else 'low'})")
+    if jnifti_count > 0:
+        info(f"  Payload includes JNIfTI conversion hint ({jnifti_count} files)")
     
-    # ========================================================================
-    # STEP 4: Call LLM
-    # ========================================================================
+    # Step 4: Call LLM
     info("\nStep 4: Calling LLM for plan generation...")
     
     evidence_json = json.dumps(optimized_bundle, indent=2)
@@ -428,66 +418,101 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
         warn(f"YAML parse error: {e}")
         fatal("Failed to parse BIDS plan YAML")
     
-    # ========================================================================
-    # STEP 5: Merge Python's results into plan
-    # ========================================================================
-    info("\nStep 5: Merging Python analysis into plan...")
+    # ===================================================================
+    # Step 5: LLM-FIRST DECISION LOGIC (CRITICAL CHANGE)
+    # ===================================================================
+    info("\nStep 5: Validating LLM plan with Python analysis...")
     
-    if subject_info["success"]:
-        subject_labels = [rec["numeric_id"] for rec in subject_info.get("subject_records", [])]
+    # Extract subject counts
+    llm_subjects = plan_yaml.get('subjects', {})
+    llm_subject_count = llm_subjects.get('count', 0)
+    llm_subject_labels = llm_subjects.get('labels', [])
+    
+    user_provided_count = evidence_bundle.get("user_hints", {}).get("n_subjects")
+    
+    info(f"  LLM analysis: {llm_subject_count} subjects")
+    info(f"  Python analysis: {python_subject_count} subjects")
+    if user_provided_count:
+        info(f"  User provided: {user_provided_count} subjects")
+    
+    # Decision logic
+    if llm_subject_count == 0:
+        # LLM 没有检测到主题（异常情况）
+        warn("  ⚠ LLM did not detect subjects!")
         
-        plan_yaml['subjects'] = {
-            'labels': subject_labels,
-            'count': len(subject_labels),
-            'source': 'python_extracted'
-        }
-        
-        plan_yaml['assignment_rules'] = []
-        for rec in subject_info.get("subject_records", []):
-            rule = {
-                'subject': rec["numeric_id"],
-                'original': rec["original_id"],
-                'match': [f"**/{rec['original_id']}*", f"**/{rec['original_id']}/**"]
+        if python_subject_count > 0:
+            info("  → Using Python's analysis as fallback")
+            # 使用 Python 的结果填充计划
+            subject_labels = [rec["numeric_id"] for rec in subject_info.get("subject_records", [])]
+            plan_yaml['subjects'] = {
+                'labels': subject_labels,
+                'count': len(subject_labels),
+                'source': 'python_fallback'
             }
-            if rec.get("site"):
-                rule['site'] = rec["site"]
-            
-            if subject_info.get("method") == "flat_filename":
-                rule['prefix'] = rec["original_id"]
-            
-            plan_yaml['assignment_rules'].append(rule)
-        
-        info(f"  ✓ Added {len(subject_labels)} subjects to plan")
-        
-        python_rules = subject_info.get("python_generated_filename_rules", [])
-        if python_rules:
-            mappings = plan_yaml.get('mappings', [])
-            if mappings:
-                llm_rules = mappings[0].get('filename_rules', [])
-                
-                if not llm_rules:
-                    mappings[0]['filename_rules'] = python_rules
-                    info(f"  ✓ Using {len(python_rules)} Python-generated filename rules")
-                else:
-                    mappings[0]['filename_rules'] = python_rules
-                    info(f"  ✓ Replaced LLM rules with {len(python_rules)} Python-generated rules")
+            _apply_python_rules_to_plan(plan_yaml, subject_info)
+        else:
+            fatal("  ✗ Both LLM and Python failed to detect subjects")
     
-    # ========================================================================
-    # STEP 6: Add metadata
-    # ========================================================================
+    elif llm_subject_count == python_subject_count:
+        # 两者一致
+        info(f"  ✓ LLM and Python agree: {llm_subject_count} subjects")
+        info("  → Using LLM's plan (with Python validation)")
+        # 保持 LLM 的计划，但可以补充 Python 的细节
+        _enhance_plan_with_python_details(plan_yaml, subject_info)
+    
+    elif user_provided_count:
+        # 用户明确指定，以用户为准
+        info(f"  → User explicitly specified {user_provided_count} subjects")
+        
+        if llm_subject_count == user_provided_count:
+            info("  ✓ LLM matches user specification")
+            # 使用 LLM 的计划
+            pass
+        elif python_subject_count == user_provided_count:
+            info("  ✓ Python matches user specification")
+            info("  → Using Python's analysis")
+            _apply_python_rules_to_plan(plan_yaml, subject_info)
+        else:
+            warn(f"  ⚠ Neither LLM ({llm_subject_count}) nor Python ({python_subject_count}) matches user ({user_provided_count})")
+            info("  → Trusting user specification, using LLM's interpretation")
+            # 保持 LLM 的计划，它可能理解了用户的意图
+    
+    else:
+        # LLM 和 Python 不一致，且用户未指定
+        warn(f"  ⚠ Conflict: LLM says {llm_subject_count}, Python says {python_subject_count}")
+        
+        # 信任 LLM（它有完整上下文，包括用户描述）
+        if llm_subject_count > python_subject_count:
+            info(f"  → Trusting LLM (it has user description and document context)")
+            info(f"  → LLM likely identified semantic groups Python missed")
+            # 使用 LLM 的计划
+            pass
+        else:
+            # Python 检测到更多主题（罕见情况）
+            info(f"  → Python found more subjects than LLM")
+            info(f"  → Using Python's analysis (may need manual review)")
+            _apply_python_rules_to_plan(plan_yaml, subject_info)
+    
+    # Add metadata
     plan_yaml['metadata'] = {
         'generated_at': datetime.now().isoformat(),
         'model': model,
+        'decision_logic': 'llm_first',
         'python_analysis': {
             'method': subject_info.get('method'),
             'success': subject_info.get('success'),
-            'subject_count': subject_info.get('subject_count', 0)
+            'subject_count': python_subject_count
+        },
+        'llm_analysis': {
+            'subject_count': llm_subject_count
+        },
+        'final_decision': {
+            'subject_count': plan_yaml.get('subjects', {}).get('count', 0),
+            'source': plan_yaml.get('subjects', {}).get('source', 'llm')
         }
     }
     
-    # ========================================================================
-    # STEP 7: Save plan
-    # ========================================================================
+    # Save plan
     plan_path = staging_dir / BIDS_PLAN
     write_yaml(plan_path, plan_yaml)
     info(f"\n✓ BIDS Plan saved: {plan_path}")
@@ -495,53 +520,90 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     if not plan_path.exists():
         fatal(f"BIDS Plan file was not created at: {plan_path}")
     
-    # ========================================================================
-    # STEP 8: Update participants.tsv with metadata (NEW!)
-    # ========================================================================
+    # Step 8: Update participants.tsv with metadata
     info("\nStep 8: Updating participants.tsv with LLM-extracted metadata...")
     
     if 'participant_metadata' in plan_yaml:
         _update_participants_with_metadata(plan_yaml, out_dir)
         info("  ✓ Participant metadata successfully applied")
-    elif 'metadata_provenance' in plan_yaml:
-        # Check whether is insufficient_evidence
-        if plan_yaml['metadata_provenance'].get('status') == 'insufficient_evidence':
-            info("  ℹ No metadata extracted (insufficient evidence)")
-        else:
-            info("  ℹ No participant metadata in plan")
     else:
-        info("  ℹ No participant metadata or provenance information")
+        info("  ℹ No participant metadata in plan")
     
-    # ========================================================================
-    # Final summary
-    # ========================================================================
     info("\n=== BIDS Plan Generation Complete ===")
     info(f"Plan location: {plan_path}")
-    info(f"Subjects detected: {subject_info.get('subject_count', 0)}")
     
-    # FIXED: Check if participant_metadata is not None and not empty
+    final_count = plan_yaml.get('subjects', {}).get('count', 0)
+    info(f"Subjects detected: {final_count}")
+    
     participant_metadata = plan_yaml.get('participant_metadata')
-    if participant_metadata and isinstance(participant_metadata, dict) and len(participant_metadata) > 0:
+    if participant_metadata:
         first_subject_metadata = list(participant_metadata.values())[0]
         if first_subject_metadata and isinstance(first_subject_metadata, dict):
             metadata_keys = list(first_subject_metadata.keys())
             info(f"Participant columns: participant_id, {', '.join(metadata_keys)}")
-    
-    if 'metadata_provenance' in plan_yaml:
-        info(f"Metadata provenance tracking: ✓ enabled")
     
     return {
         "status": "ok",
         "warnings": plan_yaml.get("questions", []),
         "questions": [],
         "subject_info": subject_info,
-        "metadata_extracted": bool(participant_metadata and isinstance(participant_metadata, dict) and len(participant_metadata) > 0)
+        "llm_subject_count": llm_subject_count,
+        "python_subject_count": python_subject_count,
+        "metadata_extracted": bool(participant_metadata)
     }
 
 
-# ============================================================================
-# Legacy Functions
-# ============================================================================
+def _apply_python_rules_to_plan(plan_yaml: Dict[str, Any], subject_info: Dict[str, Any]) -> None:
+    """Apply Python's subject detection results to the plan."""
+    subject_labels = [rec["numeric_id"] for rec in subject_info.get("subject_records", [])]
+    
+    plan_yaml['subjects'] = {
+        'labels': subject_labels,
+        'count': len(subject_labels),
+        'source': 'python_extracted'
+    }
+    
+    plan_yaml['assignment_rules'] = []
+    for rec in subject_info.get("subject_records", []):
+        rule = {
+            'subject': rec["numeric_id"],
+            'original': rec["original_id"],
+            'match': [f"**/{rec['original_id']}*", f"**/{rec['original_id']}/**"]
+        }
+        if rec.get("site"):
+            rule['site'] = rec["site"]
+        
+        if subject_info.get("method") == "flat_filename":
+            rule['prefix'] = rec["original_id"]
+        
+        plan_yaml['assignment_rules'].append(rule)
+    
+    # Apply Python-generated filename rules
+    python_rules = subject_info.get("python_generated_filename_rules", [])
+    if python_rules:
+        if 'mappings' in plan_yaml and len(plan_yaml['mappings']) > 0:
+            plan_yaml['mappings'][0]['filename_rules'] = python_rules
+            info(f"  → Applied {len(python_rules)} Python-generated filename rules")
+
+
+def _enhance_plan_with_python_details(plan_yaml: Dict[str, Any], subject_info: Dict[str, Any]) -> None:
+    """Enhance LLM's plan with Python's detailed analysis (when they agree)."""
+    # 只在缺失时补充，不覆盖 LLM 的决策
+    
+    if 'assignment_rules' not in plan_yaml or not plan_yaml['assignment_rules']:
+        info("  → Adding Python's assignment rules (LLM didn't provide them)")
+        _apply_python_rules_to_plan(plan_yaml, subject_info)
+    
+    # 补充 Python 生成的 filename rules（如果有）
+    python_rules = subject_info.get("python_generated_filename_rules", [])
+    if python_rules:
+        if 'mappings' in plan_yaml and len(plan_yaml['mappings']) > 0:
+            llm_rules = plan_yaml['mappings'][0].get('filename_rules', [])
+            
+            if not llm_rules:
+                plan_yaml['mappings'][0]['filename_rules'] = python_rules
+                info(f"  → Added {len(python_rules)} Python-generated filename rules")
+
 
 def nirs_plan_headers(model: str, planning_inputs: Dict[str, Any], 
                      out_dir: Path) -> Dict[str, Any]:

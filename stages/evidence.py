@@ -1,4 +1,5 @@
 # evidence.py - COMPLETE VERSION with participant metadata evidence collection
+# MODIFIED: Added JNIfTI detection support
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -18,6 +19,9 @@ ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
 NIRS_EXT = {".snirf", ".nirs", ".mat", ".h5", ".hdf5"}
 ARRAY_EXT = {".mat", ".h5", ".hdf5", ".npy", ".npz"}
 TRIO_NAMES = {"readme.md", "participants.tsv", "dataset_description.json"}
+
+# NEW: JNIfTI extensions
+JNIFTI_EXT = {".jnii", ".bnii"}
 
 def _is_trio_file(name: str) -> bool:
     return name.lower() in TRIO_NAMES
@@ -106,11 +110,28 @@ def _table_head(path: Path, max_rows: int = 5) -> Dict[str, Any]:
     return head
 
 def detect_kind(p: Path) -> str:
+    """
+    Detect file type/kind for classification.
+    
+    MODIFIED: Added JNIfTI detection (.jnii, .bnii files)
+    
+    Args:
+        p: File path
+    
+    Returns:
+        File kind: 'jnifti', 'mri', 'nirs', 'table', 'array', 
+                   'text_doc', 'document', 'archive', 'user_trio', 'other'
+    """
     s = p.suffix.lower()
     name = p.name.lower()
     
     if _is_trio_file(name):
         return "user_trio"
+    
+    # NEW: JNIfTI file detection - MUST be before regular MRI check
+    if s in JNIFTI_EXT:
+        return "jnifti"
+    
     if name.endswith(".nii.gz") or s in MRI_EXT:
         return "mri"
     if s in NIRS_EXT:
@@ -232,48 +253,19 @@ def _intelligent_file_sampling(files_by_ext: Dict[str, List[Path]],
     
     return samples, pattern_summary
 
-
-# ============================================================================
-# NEW FUNCTION: Collect participant metadata evidence
-# ============================================================================
-
 def _collect_participant_metadata_evidence(data_root: Path, 
                                            all_files: List[str],
                                            documents: List[Dict]) -> Dict[str, Any]:
-    """
-    Collect all evidence that may help infer participant metadata.
-    Collect raw evidence without making inferences; let LLM do the reasoning.
-
-    Evidence Types:
-
-    1. Explicit metadata files (participants.csv, etc.)
-    2. DICOM headers (PatientSex, PatientAge, etc.)
-    3. Filename semantic patterns (gender/age keywords)
-    4. Document demographic keywords
-    5. Balanced distribution patterns
-
-    Args:
-    	data_root: Data root directory
-    	all_files: List of relative paths to all files
-    	documents: List of extracted documents
-
-    Returns:
-    	Evidence dictionary containing all found evidence.
-    """
+    """Collect all evidence that may help infer participant metadata."""
     evidence = {}
     
-    # ========== Evidence Type 1: Explicit metadata files ==========
     info("  [Evidence 1/5] Scanning for explicit metadata files...")
     metadata_files = []
     
     metadata_patterns = [
-        '**/participants.*', 
-        '**/subjects.*', 
-        '**/metadata.*', 
-        '**/demographics.*', 
-        '**/phenotype.*',
-        '**/participant_data.*',
-        '**/subject_info.*'
+        '**/participants.*', '**/subjects.*', '**/metadata.*', 
+        '**/demographics.*', '**/phenotype.*',
+        '**/participant_data.*', '**/subject_info.*'
     ]
     
     for pattern in metadata_patterns:
@@ -302,7 +294,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
         evidence["explicit_metadata_files"] = {"found": False}
         info(f"    - No explicit metadata files found")
     
-    # ========== Evidence Type 2: DICOM headers sampling ==========
     info("  [Evidence 2/5] Sampling DICOM headers...")
     dicom_patient_info = []
     dicom_files = [f for f in all_files if f.lower().endswith('.dcm')]
@@ -372,7 +363,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
         evidence["dicom_headers"] = {"found": False}
         info(f"    - No DICOM files in dataset")
     
-    # ========== Evidence Type 3: Filename semantic patterns ==========
     info("  [Evidence 3/5] Analyzing filename semantic patterns...")
     filename_patterns = {
         "gender_keywords": [],
@@ -389,17 +379,12 @@ def _collect_participant_metadata_evidence(data_root: Path,
     ]
     
     age_patterns_regex = [
-        r'\d{2}yo',
-        r'\d{2}y\b',
-        r'age\d{2}',
-        r'_\d{2}_',
-        r'y\d{2}',
+        r'\d{2}yo', r'\d{2}y\b', r'age\d{2}', r'_\d{2}_', r'y\d{2}',
     ]
     
     group_keywords = [
         'patient', 'control', 'healthy', 'disease',
-        'hc', 'pt', 'ctrl',
-        'case', 'normal',
+        'hc', 'pt', 'ctrl', 'case', 'normal',
         'treated', 'untreated'
     ]
     
@@ -458,7 +443,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
         evidence["filename_semantic_patterns"] = {"found": False}
         info(f"    - No semantic patterns found in filenames")
     
-    # ========== Evidence Type 4: Document demographic keywords ==========
     info("  [Evidence 4/5] Searching documents for demographic keywords...")
     demographic_keywords_in_docs = []
     
@@ -507,7 +491,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
         evidence["document_demographic_keywords"] = {"found": False}
         info(f"    - No demographic keywords found in documents")
     
-    # ========== Evidence Type 5: Balanced distribution ==========
     info("  [Evidence 5/5] Analyzing subject grouping patterns...")
     
     from filename_tokenizer import FilenamePatternAnalyzer
@@ -542,7 +525,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
         evidence["balanced_prefix_distribution"] = {"found": False}
         info(f"    - No balanced distribution pattern detected")
     
-    # ========== Summary ==========
     evidence_types_found = sum(1 for v in evidence.values() 
                                if isinstance(v, dict) and v.get('found'))
     
@@ -555,11 +537,6 @@ def _collect_participant_metadata_evidence(data_root: Path,
     info(f"\n  Summary: Found {evidence_types_found}/5 types of evidence")
     
     return evidence
-
-
-# ============================================================================
-# MODIFIED: _build_evidence_bundle_internal with evidence collection
-# ============================================================================
 
 def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[int], 
                                      modality_hint: str, user_text: str,
@@ -657,9 +634,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         
         samples.append(entry)
     
-    # ========================================================================
-    # CRITICAL: Now that documents are extracted, collect metadata evidence
-    # ========================================================================
     info("\n=== Collecting Participant Metadata Evidence ===")
     participant_evidence = _collect_participant_metadata_evidence(
         data_root=root,
@@ -670,9 +644,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     evidence_count = participant_evidence['summary']['total_evidence_types_found']
     info(f"\n✓ Evidence collection complete: {evidence_count}/5 types found")
     
-    # ========================================================================
-    # Determine final subject count
-    # ========================================================================
     path_based_count = subject_detection_result["best_candidate"]["count"] if subject_detection_result["best_candidate"] else 0
     path_based_confidence = subject_detection_result["confidence"]
     
@@ -700,9 +671,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
         count_source = "fallback"
         warn("\n⚠ Could not detect subject count from either path or filename, using fallback: 1")
     
-    # ========================================================================
-    # Build final evidence bundle
-    # ========================================================================
     bundle = {
         "root": str(root),
         "counts_by_ext": {ext: len(lst) for ext, lst in by_ext.items()},
@@ -767,7 +735,6 @@ def _build_evidence_bundle_internal(data_root: Path, user_n_subjects: Optional[i
     info(f"Sampling: {sum(s['total_patterns'] for s in pattern_summary.values())} unique patterns")
     
     return bundle
-
 
 def build_evidence_bundle(output_dir: Path, user_hints: Dict[str, Any]) -> None:
     output_dir = Path(output_dir)

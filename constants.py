@@ -59,9 +59,13 @@ SEVERITY_WARN = "warn"
 SEVERITY_BLOCK = "block"
 
 # ==================== FILE EXTENSIONS ====================
-MRI_EXTENSIONS = ['.nii', '.nii.gz', '.dcm', '.mat']
+# MODIFIED: Added JNIfTI extensions (.jnii, .bnii)
+MRI_EXTENSIONS = ['.nii', '.nii.gz', '.dcm', '.mat', '.jnii', '.bnii']
 NIRS_EXTENSIONS = ['.snirf', '.nirs', '.csv', '.mat']
 DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.txt', '.md', '.rst']
+
+# NEW: JNIfTI specific extensions
+JNIFTI_EXTENSIONS = ['.jnii', '.bnii']
 
 # ==================== MODALITY TYPES ====================
 MODALITY_MRI = "mri"
@@ -82,12 +86,11 @@ NIRS_POOL = "_staging/nirs_pool"
 MRI_POOL = "_staging/mri_pool"
 UNKNOWN_POOL = "_staging/unknown"
 
-# CRITICAL FIX: Remove path prefix from these constants
 HEADERS_DRAFT = "nirs_headers_draft.json"
 HEADERS_NORMALIZED = "nirs_headers_normalized.json"
 VOXEL_DRAFT = "mri_voxel_draft.json"
 VOXEL_FINAL_PLAN = "mri_voxel_final_plan.json"
-BIDS_PLAN = "BIDSPlan.yaml"  # Just filename, no "_staging/" prefix
+BIDS_PLAN = "BIDSPlan.yaml"
 
 # ==================== DEFAULT VALUES ====================
 DEFAULT_MODEL = "gpt-4o"
