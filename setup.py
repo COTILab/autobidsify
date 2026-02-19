@@ -49,7 +49,7 @@ setup(
     install_requires=[
         "openai>=1.0.0",
         "pyyaml>=6.0",
-        "pdfplumber>=0.10.0",
+        "pdfplumber>=0.8.0",
         "PyPDF2>=3.0.0",
         "python-docx>=1.0.0",
         "pydicom>=2.4.0",
