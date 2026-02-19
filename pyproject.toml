@@ -79,11 +79,11 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fangzhouliucode/autobidsify"
+Homepage = "https://github.com/cotilab/autobidsify"
 Documentation = "https://autobidsify.readthedocs.io"
-Repository = "https://github.com/fangzhouliucode/autobidsify"
-Issues = "https://github.com/fangzhouliucode/autobidsify/issues"
-Changelog = "https://github.com/fangzhouliucode/autobidsify/blob/main/CHANGELOG.md"
+Repository = "https://github.com/cotilab/autobidsify"
+Issues = "https://github.com/cotilab/autobidsify/issues"
+Changelog = "https://github.com/cotilab/autobidsify/blob/main/CHANGELOG.md"
 
 [project.scripts]
 autobidsify = "autobidsify.__main__:main"

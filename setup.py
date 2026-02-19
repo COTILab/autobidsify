@@ -33,11 +33,11 @@ setup(
     description="Automated BIDS standardization tool powered by LLM-first architecture",
     long_description=get_long_description(),
     long_description_content_type="text/markdown",
-    url="https://github.com/fangzhouliucode/autobidsify",
+    url="https://github.com/cotilab/autobidsify",
     project_urls={
         "Documentation": "https://autobidsify.readthedocs.io",
-        "Repository": "https://github.com/fangzhouliucode/autobidsify",
-        "Issues": "https://github.com/fangzhouliucode/autobidsify/issues",
+        "Repository": "https://github.com/cotilab/autobidsify",
+        "Issues": "https://github.com/cotilab/autobidsify/issues",
     },
     license="MIT",
     
