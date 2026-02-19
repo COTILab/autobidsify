@@ -1,157 +1,53 @@
-name: AutoBidsify CI
+name: Test Autobidsify
 
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      target:
-        description: 'Publish target'
-        required: true
-        default: 'testpypi'
-        type: choice
-        options:
-          - testpypi
-          - pypi
+on: [push]
 
 jobs:
-  # ===========================================================================
-  # Job 1: Test
-  # ===========================================================================
   test:
-    name: Test (Python ${{ matrix.python-version }} on ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v3
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/Library/Caches/pip
-            ~\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}-
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install ".[dev]"
-
-      - name: Run linting with ruff
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Build sdist
         run: |
-          ruff check autobidsify/
-
-      - name: Check formatting with black
-        run: |
-          black --check autobidsify/
-
-      - name: Run type checking with mypy
-        run: |
-          mypy autobidsify/ --ignore-missing-imports
-
-      - name: Run tests with pytest
-        run: |
-          pytest tests/ -v --cov=autobidsify --cov-report=xml --cov-report=term-missing
-
-      - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.xml
-          fail_ci_if_error: false
-
-  # ===========================================================================
-  # Job 2: Build
-  # ===========================================================================
-  build:
-    name: Build Package
-    runs-on: ubuntu-latest
+          python setup.py sdist
+      - name: Run tests and coverage
+        run: make test
+  deploy:
+    runs-on: ubuntu-22.04
     needs: test
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v3
         with:
-          python-version: "3.11"
-
-      - name: Install build dependencies
+          submodules: 'recursive'
+      - name: Install build
+        run: python3 -m pip install --upgrade build
+      - name: Build wheel
         run: |
-          python -m pip install --upgrade pip
-          pip install build twine
-
-      - name: Build package
+          python3 -m build
+      - name: Check If the Build Version Exists on PyPI
+        id: perform_pypi_upload_check
+        shell: bash
         run: |
-          python -m build
-
-      - name: Check package
-        run: |
-          twine check dist/*
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Test wheel installation
-        run: |
-          pip install dist/*.whl
-          autobidsify --help
-          python -m autobidsify --help
-          python -c "import autobidsify; print(f'Version: {autobidsify.__version__}')"
-
-  # ===========================================================================
-  # Job 3: Publish
-  # ===========================================================================
-  publish:
-    name: Publish to ${{ github.event_name == 'release' && 'PyPI' || github.event.inputs.target || 'PyPI' }}
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-
-    environment:
-      name: ${{ github.event_name == 'release' && 'pypi' || github.event.inputs.target }}
-      url: ${{ github.event_name == 'release' && 'https://pypi.org/project/autobidsify/' || (github.event.inputs.target == 'pypi' && 'https://pypi.org/project/autobidsify/' || 'https://test.pypi.org/project/autobidsify/') }}
-
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to TestPyPI
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'
+          $GITHUB_WORKSPACE/.github/check-pypi-upload.sh
+      - name: Upload packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        if: ${{ (github.actor == 'fangq' || github.actor == 'yiyiliu-rose') && steps.perform_pypi_upload_check.outputs.perform_pypi_upload == 1  && github.event_name != 'pull_request'}}
         with:
-          repository-url: https://test.pypi.org/legacy/
-
-      - name: Publish to PyPI
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
-        uses: pypa/gh-action-pypi-publish@release/v1
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          verify_metadata: false
+          verbose: true
+          skip_existing: true
