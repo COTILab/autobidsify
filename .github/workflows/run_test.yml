@@ -25,7 +25,7 @@ jobs:
           python -m pip install setuptools
           python setup.py sdist
       - name: Run tests and coverage
-        run: make test
+        run: python -m unittest discover -v -s test
   deploy:
     runs-on: ubuntu-22.04
     needs: test
