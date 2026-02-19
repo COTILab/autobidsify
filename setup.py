@@ -55,7 +55,7 @@ setup(
         "pydicom>=2.4.0",
         "nibabel>=2.0.0",
         "h5py>=3.8.0",
-        "numpy>=1.24.0",
+        "numpy>=1.21.0",
         "pandas>=2.0.0",
         "scipy>=1.10.0",
         "openpyxl>=3.1.0",
