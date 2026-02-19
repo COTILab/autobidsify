@@ -91,42 +91,4 @@ setup(
     include_package_data=True,
     zip_safe=False,
 )
-```
 
-## Final Flat Layout Structure
-```
-autobidsify/                    # Repository root
-├── pyproject.toml
-├── setup.py
-├── README.md
-├── LICENSE
-├── CHANGELOG.md
-├── .gitignore
-│
-├── autobidsify/                # Package directory
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── constants.py
-│   ├── filename_tokenizer.py
-│   ├── llm.py
-│   ├── universal_core.py
-│   ├── utils.py
-│   ├── stages/
-│   │   ├── __init__.py
-│   │   ├── classification.py
-│   │   ├── evidence.py
-│   │   ├── ingest.py
-│   │   └── trio.py
-│   └── converters/
-│       ├── __init__.py
-│       ├── executor.py
-│       ├── jnifti_converter.py
-│       ├── mri_convert.py
-│       ├── nirs_convert.py
-│       ├── planner.py
-│       └── validators.py
-│
-├── tests/
-│   └── __init__.py
-│
-└── docs/
