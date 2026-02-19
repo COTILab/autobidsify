@@ -44,7 +44,7 @@ setup(
     # Flat layout - no package_dir needed
     packages=find_packages(exclude=["tests", "tests.*", "docs"]),
     
-    python_requires=">=3.10",
+    python_requires=">=3.7",
     
     install_requires=[
         "openai>=1.0.0",

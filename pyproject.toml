@@ -8,7 +8,7 @@ version = "0.5.0"
 description = "Automated BIDS standardization tool powered by LLM-first architecture"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.7"
 authors = [
     {name = "Yiyi Liu", email = "yiyi.liu3@northeastern.edu"}
 ]
