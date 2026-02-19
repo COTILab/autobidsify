@@ -53,7 +53,7 @@ setup(
         "PyPDF2>=3.0.0",
         "python-docx>=1.0.0",
         "pydicom>=2.4.0",
-        "nibabel>=5.0.0",
+        "nibabel>=2.0.0",
         "h5py>=3.8.0",
         "numpy>=1.24.0",
         "pandas>=2.0.0",
