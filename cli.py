@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Command-line interface for BIDS Pipeline
+Command-line interface for BIDS Pipeline v10
+NEW: Support for both OpenAI and Qwen (Ollama) models
 """
 
 import argparse
@@ -24,6 +25,13 @@ from converters.planner import build_bids_plan
 from converters.executor import execute_bids_plan
 from converters.validators import validate_bids_compatible
 from utils import info, warn, fatal, read_json, read_yaml
+from constants import QWEN_RECOMMENDED_MODELS
+
+
+def is_qwen_model(model: str) -> bool:
+    """Check if model is a Qwen model."""
+    return model.startswith('qwen')
+
 
 def is_reasoning_model(model: str) -> bool:
     """Check if model is a reasoning model (o1/o3/gpt-5 series)."""
@@ -33,36 +41,60 @@ def is_reasoning_model(model: str) -> bool:
         model.startswith("gpt-5")
     )
 
+
 def validate_model(model: str) -> None:
     """Validate and display model information."""
-    if is_reasoning_model(model):
-        info(f"Using reasoning model: {model}")
+    if is_qwen_model(model):
+        info(f"Using Qwen model (via Ollama): {model}")
+        info(f"  Make sure Ollama is running: ollama serve")
+        info(f"  Make sure model is pulled: ollama pull {model}")
+    elif is_reasoning_model(model):
+        info(f"Using OpenAI reasoning model: {model}")
     else:
-        info(f"Using model: {model}")
+        info(f"Using OpenAI model: {model}")
+
 
 def setup_parser():
-    """Setup command-line argument parser."""
+    """Setup command-line argument parser with Qwen support."""
     parser = argparse.ArgumentParser(
-        description="BIDS Standardization Pipeline",
+        description="BIDS Standardization Pipeline v10 (OpenAI + Qwen support)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Auto-detect subject count
-  python cli.py full --input data.zip --output bids_out --model gpt-4o
+
+  # Using OpenAI (default)
+  python cli.py full --input data/ --output bids_out --model gpt-4o
   
-  # Provide subject count (skips auto-detection, faster for large datasets)
-  python cli.py full --input data.zip --output bids_out --model gpt-4o --nsubjects 650
+  # Using Qwen (via Ollama) - Recommended for coding tasks
+  python cli.py full --input data/ --output bids_out --model qwen2.5-coder:7b
   
-  # Single modality (skip classification)
-  python cli.py full --input data/ --output bids_out --modality mri --model gpt-4o
+  # Using Qwen - General purpose
+  python cli.py full --input data/ --output bids_out --model qwen2.5:14b
   
-  # Step-by-step execution
-  python cli.py ingest --input data.zip --output bids_out
-  python cli.py evidence --output bids_out --modality mri
-  python cli.py trio --output bids_out --model gpt-4o --file all
-  python cli.py plan --output bids_out --model gpt-4o
-  python cli.py execute --output bids_out
-  python cli.py validate --output bids_out
+  # Using Qwen - Lightweight
+  python cli.py full --input data/ --output bids_out --model qwen2.5:7b
+  
+  # With custom ID strategy
+  python cli.py full --input data/ --output bids_out \\
+    --model qwen2.5-coder:14b --id-strategy numeric
+
+Supported Qwen Models (via Ollama):
+  General:
+    - qwen2.5:7b         (Balanced, 4.7GB)
+    - qwen2.5:14b        (Better performance)
+    - qwen2.5:32b        (Strong performance)
+    - qwen3:8b           (Latest generation)
+  
+  Coding (Recommended for BIDS pipeline):
+    - qwen2.5-coder:7b   (Code-optimized, recommended)
+    - qwen2.5-coder:14b  (Better code understanding)
+    - qwen2.5-coder:32b  (Near GPT-4o performance)
+
+Setup Ollama:
+  1. Install: https://ollama.com/download
+  2. Start: ollama serve
+  3. Pull model: ollama pull qwen2.5-coder:7b
+  4. Install Python lib: pip install ollama
         """
     )
     
@@ -81,7 +113,11 @@ Examples:
     full_parser.add_argument('--describe', type=str,
                             help='Additional description or notes about the dataset')
     full_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model to use (default: gpt-4o)')
+                            help='LLM model: OpenAI (gpt-4o, gpt-4o-mini) or Qwen (qwen2.5-coder:7b, qwen2.5:14b, etc.)')
+    full_parser.add_argument('--id-strategy', type=str,
+                            choices=['auto', 'numeric', 'semantic'],
+                            default='auto',
+                            help='Subject ID strategy (auto/numeric/semantic)')
     
     # Ingest command
     ingest_parser = subparsers.add_parser('ingest', help='Ingest data')
@@ -106,7 +142,7 @@ Examples:
     classify_parser.add_argument('--output', type=str, required=True,
                                 help='Output directory')
     classify_parser.add_argument('--model', type=str, default='gpt-4o',
-                                help='LLM model to use')
+                                help='LLM model (OpenAI or Qwen)')
     
     # Trio command
     trio_parser = subparsers.add_parser('trio', help='Generate trio files')
@@ -117,14 +153,18 @@ Examples:
                             default='all',
                             help='Which trio file(s) to generate')
     trio_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model to use')
+                            help='LLM model (OpenAI or Qwen)')
     
     # Plan command
     plan_parser = subparsers.add_parser('plan', help='Generate BIDS plan')
     plan_parser.add_argument('--output', type=str, required=True,
                             help='Output directory')
     plan_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model to use')
+                            help='LLM model (OpenAI or Qwen)')
+    plan_parser.add_argument('--id-strategy', type=str,
+                            choices=['auto', 'numeric', 'semantic'],
+                            default='auto',
+                            help='Subject ID strategy')
     
     # Execute command
     execute_parser = subparsers.add_parser('execute', help='Execute conversions')
@@ -138,10 +178,12 @@ Examples:
     
     return parser
 
+
 def run_full_pipeline(args):
     """Run complete BIDS conversion pipeline."""
-    info("=== Starting Full Pipeline ===")
+    info("=== Starting Full Pipeline v10 ===")
     validate_model(args.model)
+    info(f"Subject ID strategy: {args.id_strategy}")
     
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +197,7 @@ def run_full_pipeline(args):
     # Stage 2: Evidence
     info("\n[2/7] Building evidence bundle...")
     user_hints = {
-        "n_subjects": args.nsubjects,  # Can be None for auto-detection
+        "n_subjects": args.nsubjects,
         "modality_hint": args.modality,
         "user_text": args.describe or ""
     }
@@ -173,22 +215,12 @@ def run_full_pipeline(args):
     info("\n[4/7] Generating BIDS trio files...")
     bundle = read_json(output_dir / "_staging" / "evidence_bundle.json")
     
-    # Check if subject count was detected
-    detected_count = bundle.get("subject_detection", {}).get("detected_count")
     count_source = bundle.get("subject_detection", {}).get("count_source")
-    
     if count_source == "user_provided":
         info(f"✓ Using user-provided subject count: {args.nsubjects}")
-    elif detected_count:
-        info(f"✓ Auto-detected {detected_count} subjects")
-    else:
-        warn("Subject count not detected and not provided by user")
     
-    # Generate dataset_description and README
     dd_result = generate_dataset_description(args.model, bundle, output_dir)
     readme_result = generate_readme(args.model, bundle, output_dir)
-    
-    # Try to generate participants.tsv (will skip if too complex)
     parts_result = generate_participants(args.model, bundle, output_dir)
     
     all_warnings = []
@@ -210,9 +242,8 @@ def run_full_pipeline(args):
     }
     planning_inputs = {"evidence_bundle": bundle, "trio_status": trio_status}
     
-    plan_result = build_bids_plan(args.model, planning_inputs, output_dir)
+    plan_result = build_bids_plan(args.model, planning_inputs, output_dir, id_strategy=args.id_strategy)
     
-    # Check for blocking questions
     if plan_result.get("status") == "blocked":
         fatal("\n⚠ BLOCKING QUESTIONS DETECTED:")
         for q in plan_result.get("questions", []):
@@ -223,12 +254,10 @@ def run_full_pipeline(args):
     
     if not (output_dir / "participants.tsv").exists():
         warn("WARNING: participants.tsv was not created by Plan stage")
-        warn("This may indicate an issue with subject detection")
     
     # Stage 6: Execute
     info("\n[6/7] Executing conversions...")
     
-    # Read ingest_info to get actual data path
     ingest_info = read_json(output_dir / "_staging" / "ingest_info.json")
     actual_data_path = Path(ingest_info.get("actual_data_path", 
                                             output_dir / "_staging" / "extracted"))
@@ -243,6 +272,7 @@ def run_full_pipeline(args):
     info("\n=== Pipeline Complete ===")
     info(f"Output: {output_dir / 'bids_compatible'}")
 
+
 def run_ingest(args):
     """Run ingest stage."""
     info("=== Running Ingest ===")
@@ -251,17 +281,19 @@ def run_ingest(args):
     ingest_data(args.input, output_dir)
     info("✓ Ingest complete")
 
+
 def run_evidence(args):
     """Run evidence bundle generation."""
     info("=== Building Evidence Bundle ===")
     output_dir = Path(args.output)
     user_hints = {
-        "n_subjects": args.nsubjects,  # Can be None
+        "n_subjects": args.nsubjects,
         "modality_hint": args.modality,
         "user_text": args.describe or ""
     }
     build_evidence_bundle(output_dir, user_hints)
     info("✓ Evidence bundle complete")
+
 
 def run_classify(args):
     """Run file classification."""
@@ -270,6 +302,7 @@ def run_classify(args):
     output_dir = Path(args.output)
     classify_files(args.model, output_dir)
     info("✓ Classification complete")
+
 
 def run_trio(args):
     """Run trio file generation."""
@@ -300,10 +333,13 @@ def run_trio(args):
     
     info("✓ Trio generation complete")
 
+
 def run_plan(args):
     """Run BIDS plan generation."""
     info("=== Generating BIDS Plan ===")
     validate_model(args.model)
+    info(f"Subject ID strategy: {args.id_strategy}")
+    
     output_dir = Path(args.output)
     
     bundle_path = output_dir / "_staging" / "evidence_bundle.json"
@@ -321,15 +357,7 @@ def run_plan(args):
     
     planning_inputs = {"evidence_bundle": bundle, "trio_status": trio_status}
     
-    normalized_path = output_dir / "_staging" / "headers_normalized.json"
-    if normalized_path.exists():
-        planning_inputs["normalized_headers"] = read_json(normalized_path)
-    
-    final_plan_path = output_dir / "_staging" / "voxel_final_plan.json"
-    if final_plan_path.exists():
-        planning_inputs["final_mapping_plan"] = read_json(final_plan_path)
-    
-    result = build_bids_plan(args.model, planning_inputs, output_dir)
+    result = build_bids_plan(args.model, planning_inputs, output_dir, id_strategy=args.id_strategy)
     
     if result.get("status") == "ok":
         info("✓ BIDS plan generation complete")
@@ -341,6 +369,7 @@ def run_plan(args):
         warn("\nPlease resolve these issues and re-run this command")
     else:
         warn("BIDS plan generation encountered errors")
+
 
 def run_execute(args):
     """Run BIDS plan execution."""
@@ -354,7 +383,6 @@ def run_execute(args):
     
     plan_dict = read_yaml(plan_path)
     
-    # Read ingest_info to get actual data path
     ingest_info_path = output_dir / "_staging" / "ingest_info.json"
     if not ingest_info_path.exists():
         fatal(f"Ingest info not found: {ingest_info_path}")
@@ -365,18 +393,12 @@ def run_execute(args):
                                             output_dir / "_staging" / "extracted"))
     
     aux_inputs = {}
-    normalized_path = output_dir / "_staging" / "headers_normalized.json"
-    if normalized_path.exists():
-        aux_inputs["normalized_headers"] = read_json(normalized_path)
-    
-    final_plan_path = output_dir / "_staging" / "voxel_final_plan.json"
-    if final_plan_path.exists():
-        aux_inputs["final_mapping_plan"] = read_json(final_plan_path)
     
     result = execute_bids_plan(actual_data_path, output_dir, plan_dict, aux_inputs)
     
     info("✓ Execution complete")
     info(f"  BIDS dataset: {result.get('bids_root')}")
+
 
 def run_validate(args):
     """Run BIDS validation."""
@@ -390,6 +412,7 @@ def run_validate(args):
         info("✓ Validation complete")
     else:
         warn("Validation encountered errors")
+
 
 def main():
     """Main entry point."""
@@ -427,6 +450,7 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

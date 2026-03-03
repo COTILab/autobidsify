@@ -1,8 +1,11 @@
 import os
 import json
-from typing import Any
-from openai import OpenAI, OpenAIError
-from utils import warn, fatal
+from typing import Any, Optional
+from utils import warn, fatal, info
+
+# ============================================================================
+# Exception Classes
+# ============================================================================
 
 class LLMHardFail(Exception):
     def __init__(self, step: str, error_type: str, message: str):
@@ -11,7 +14,41 @@ class LLMHardFail(Exception):
         self.message = message
         super().__init__(f"[{step}] {error_type}: {message}")
 
-def _get_client() -> OpenAI:
+
+# ============================================================================
+# Provider Detection
+# ============================================================================
+
+def is_qwen_model(model: str) -> bool:
+    """Check if model is a Qwen model."""
+    return model.startswith('qwen')
+
+
+def is_openai_model(model: str) -> bool:
+    """Check if model is an OpenAI model."""
+    return model.startswith(('gpt', 'o1', 'o3'))
+
+
+def is_reasoning_model(model: str) -> bool:
+    """Check if model is a reasoning model (o1/o3/gpt-5 series)."""
+    return (
+        model.startswith("o1") or 
+        model.startswith("o3") or
+        model.startswith("gpt-5")
+    )
+
+
+# ============================================================================
+# OpenAI Client
+# ============================================================================
+
+def _get_openai_client():
+    """Get OpenAI client."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        fatal("openai library not installed. Install with: pip install openai")
+    
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         fatal("OPENAI_API_KEY not found in environment. Please set it.")
@@ -21,8 +58,16 @@ def _get_client() -> OpenAI:
     except Exception as e:
         raise LLMHardFail("Initialization", "ClientError", str(e))
 
-def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temperature: float = None) -> str:
-    client = _get_client()
+
+def _call_openai(model: str, system_prompt: str, user_payload: str, 
+                step: str, temperature: Optional[float] = None) -> str:
+    """Call OpenAI API."""
+    client = _get_openai_client()
+    
+    try:
+        from openai import OpenAIError
+    except ImportError:
+        fatal("openai library not installed")
     
     try:
         api_params = {
@@ -33,13 +78,8 @@ def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temp
             ]
         }
         
-        is_reasoning_model = (
-            model.startswith("o1") or 
-            model.startswith("o3") or
-            model.startswith("gpt-5")
-        )
-        
-        if is_reasoning_model:
+        # Reasoning models use different parameters
+        if is_reasoning_model(model):
             api_params["max_completion_tokens"] = 32000
         else:
             api_params["max_completion_tokens"] = 16000
@@ -55,7 +95,7 @@ def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temp
                 if content and content.strip():
                     return content.strip()
                 else:
-                    raise LLMHardFail(step, "EmptyResponse", f"LLM returned empty content")
+                    raise LLMHardFail(step, "EmptyResponse", "LLM returned empty content")
             else:
                 raise LLMHardFail(step, "InvalidResponse", "Response has no message.content")
         else:
@@ -65,6 +105,218 @@ def _call_llm(model: str, system_prompt: str, user_payload: str, step: str, temp
         raise LLMHardFail(step, e.__class__.__name__, str(e))
     except Exception as e:
         raise LLMHardFail(step, "UnexpectedError", str(e))
+
+
+# ============================================================================
+# Qwen Client via Ollama
+# ============================================================================
+
+def _call_qwen_ollama(model: str, system_prompt: str, user_payload: str,
+                     step: str, temperature: Optional[float] = None) -> str:
+    """
+    Call Qwen via Ollama (local deployment).
+    
+    Compatible with ollama >= 0.6 (object-style response).
+    
+    Requires:
+    1. Ollama installed and running
+    2. Model pulled: ollama pull qwen2.5-coder:7b
+    3. Python package: pip install ollama
+    """
+    try:
+        import ollama
+    except ImportError:
+        raise LLMHardFail(step, "OllamaNotInstalled",
+                         "ollama library not installed. Install with: pip install ollama")
+    
+    try:
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_payload}
+        ]
+        
+        options = {}
+        if temperature is not None:
+            options['temperature'] = temperature
+        
+        # Call Ollama
+        if options:
+            response = ollama.chat(model=model, messages=messages, options=options)
+        else:
+            response = ollama.chat(model=model, messages=messages)
+        
+        # FIXED: Handle ollama 0.6+ object-style response
+        # response is ChatResponse object with .message.content attributes
+        if hasattr(response, 'message') and hasattr(response.message, 'content'):
+            content = response.message.content
+            if content and content.strip():
+                return content.strip()
+            else:
+                raise LLMHardFail(step, "EmptyResponse", "Qwen returned empty content")
+        
+        # Fallback for older ollama versions (dict-style)
+        elif isinstance(response, dict) and 'message' in response:
+            message = response['message']
+            if isinstance(message, dict) and 'content' in message:
+                content = message['content']
+                if content and content.strip():
+                    return content.strip()
+                else:
+                    raise LLMHardFail(step, "EmptyResponse", "Qwen returned empty content")
+        
+        # If neither format works
+        else:
+            raise LLMHardFail(step, "InvalidResponse", 
+                            f"Unexpected response format. Type: {type(response)}, "
+                            f"Has message: {hasattr(response, 'message')}")
+    
+    except ImportError:
+        raise
+    except LLMHardFail:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if 'connection' in error_msg.lower() or 'refused' in error_msg.lower():
+            raise LLMHardFail(step, "OllamaNotRunning", 
+                            "Could not connect to Ollama. Start with: ollama serve")
+        elif 'not found' in error_msg.lower() or 'pull' in error_msg.lower():
+            raise LLMHardFail(step, "ModelNotFound",
+                            f"Model '{model}' not found. Pull with: ollama pull {model}")
+        else:
+            raise LLMHardFail(step, "QwenError", str(e))
+
+
+# ============================================================================
+# Qwen Client via DashScope API (optional)
+# ============================================================================
+
+def _call_qwen_api(model: str, system_prompt: str, user_payload: str,
+                  step: str, temperature: Optional[float] = None) -> str:
+    """
+    Call Qwen via DashScope API (Alibaba Cloud).
+    
+    ALTERNATIVE to Ollama - uses cloud API instead of local deployment.
+    
+    Setup:
+    1. Get API key from: https://dashscope.console.aliyun.com/
+    2. Set environment: export DASHSCOPE_API_KEY='sk-...'
+    3. Install: pip install dashscope
+    
+    Args:
+        model: Qwen model name (e.g., 'qwen-max', 'qwen-plus', 'qwen-turbo')
+        system_prompt: System prompt
+        user_payload: User message
+        step: Step name for logging
+        temperature: Temperature parameter
+    
+    Returns:
+        Model response text
+    """
+    try:
+        import dashscope
+        from dashscope import Generation
+    except ImportError:
+        raise LLMHardFail(step, "DashScopeNotInstalled",
+                         "dashscope library not installed. Install with: pip install dashscope")
+    
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        raise LLMHardFail(step, "MissingAPIKey",
+                         "DASHSCOPE_API_KEY not found. Get it from: https://dashscope.console.aliyun.com/")
+    
+    dashscope.api_key = api_key
+    
+    try:
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_payload}
+        ]
+        
+        # Map simplified model names to DashScope model names
+        model_mapping = {
+            'qwen-max': 'qwen-max',
+            'qwen-plus': 'qwen-plus', 
+            'qwen-turbo': 'qwen-turbo',
+            'qwen2.5-coder': 'qwen-coder-plus',
+        }
+        
+        # Use mapped name or original
+        dashscope_model = model_mapping.get(model, model)
+        
+        response = Generation.call(
+            model=dashscope_model,
+            messages=messages,
+            result_format='message',
+            temperature=temperature if temperature is not None else 0.85
+        )
+        
+        if response.status_code == 200:
+            content = response.output.choices[0].message.content
+            if content and content.strip():
+                return content.strip()
+            else:
+                raise LLMHardFail(step, "EmptyResponse", "Qwen API returned empty content")
+        else:
+            raise LLMHardFail(step, "APIError", 
+                            f"DashScope API error: {response.code} - {response.message}")
+    
+    except ImportError:
+        raise
+    except Exception as e:
+        raise LLMHardFail(step, "QwenAPIError", str(e))
+
+
+def _call_qwen(model: str, system_prompt: str, user_payload: str,
+              step: str, temperature: Optional[float] = None) -> str:
+    """
+    Call Qwen model - tries Ollama first, falls back to API.
+    
+    Priority:
+    1. Try Ollama (local, free) if available
+    2. Fall back to DashScope API if Ollama fails
+    """
+    # Try Ollama first
+    try:
+        return _call_qwen_ollama(model, system_prompt, user_payload, step, temperature)
+    except LLMHardFail as e:
+        # If Ollama not available, try DashScope API
+        if e.error_type in ["OllamaNotInstalled", "OllamaNotRunning", "ModelNotFound"]:
+            if os.getenv("DASHSCOPE_API_KEY"):
+                warn(f"Ollama not available, trying DashScope API...")
+                return _call_qwen_api(model, system_prompt, user_payload, step, temperature)
+            else:
+                fatal("Qwen model requires either:")
+                fatal("  Option 1: Ollama (local, free)")
+                fatal("    - Start: ollama serve")
+                fatal("    - Pull: ollama pull qwen2.5-coder:7b")
+                fatal("  Option 2: DashScope API (cloud)")
+                fatal("    - Get key: https://dashscope.console.aliyun.com/")
+                fatal("    - Set: export DASHSCOPE_API_KEY='sk-...'")
+        else:
+            raise
+
+
+# ============================================================================
+# Unified LLM Call
+# ============================================================================
+
+def _call_llm(model: str, system_prompt: str, user_payload: str, 
+             step: str, temperature: Optional[float] = None) -> str:
+    """
+    Universal LLM caller - supports OpenAI and Qwen.
+    
+    Auto-detects provider based on model name:
+    - gpt*, o1*, o3* → OpenAI
+    - qwen* → Qwen (Ollama or DashScope API)
+    """
+    if is_qwen_model(model):
+        return _call_qwen(model, system_prompt, user_payload, step, temperature)
+    elif is_openai_model(model):
+        return _call_openai(model, system_prompt, user_payload, step, temperature)
+    else:
+        raise LLMHardFail(step, "UnknownProvider", 
+                         f"Unknown model: {model}. Use 'gpt*', 'o1*', 'o3*', or 'qwen*'")
+
 
 # ============================================================================
 # PROMPTS
@@ -83,38 +335,67 @@ Output JSON (ONLY valid JSON, no extra text):
   "questions": [...]
 }"""
 
-PROMPT_TRIO_DATASET_DESC = """You are a BIDS dataset_description.json generator.
+PROMPT_TRIO_DATASET_DESC = """You are a BIDS dataset_description.json metadata extractor.
 
-CRITICAL: Use user_hints.user_text to extract dataset information!
+═══════════════════════════════════════════════════════
+YOUR JOB
+═══════════════════════════════════════════════════════
 
-CRITICAL RULES:
-- Authors MUST be array: ["Name 1", "Name 2", "Name 3"]
-- Funding MUST be array
-- EthicsApprovals MUST be array
-- DO NOT include empty strings "" or empty arrays []
-- License normalization: "CC BY 4.0" -> "CC-BY-4.0"
+Extract dataset metadata from the input. Return ONLY valid JSON, no markdown.
 
-Extract from user_hints.user_text:
-- Dataset name
-- Authors/institutions mentioned
-- Funding sources
-- License information (default to PD for public domain datasets)
+═══════════════════════════════════════════════════════
+CRITICAL RULES
+═══════════════════════════════════════════════════════
 
-Input: {existing, documents, user_hints, counts_by_ext}
+1. LICENSE — output as "raw_license" (plain string, NOT normalized):
+   - Copy exactly what the user wrote, e.g. "CC0", "CC BY 4.0",
+     "Creative Commons Zero", "public domain", "MIT license"
+   - Do NOT try to normalize or format it — Python will do that
+   - If the user wrote "License: CC0" → raw_license: "CC0"
+   - If the document says "released under Creative Commons" → raw_license: "Creative Commons"
+   - If no license mentioned anywhere → omit raw_license
 
-Output JSON (ONLY valid JSON, no extra text):
+2. AUTHORS — extract ONLY from user_hints.user_text:
+   - Look for citation/reference patterns: "Author, A., Author, B. (year)..."
+   - Do NOT extract authors from documents[] (those are reference papers, not dataset owners)
+   - Output as array: ["First Last", "First Last"]
+
+3. NAME — infer from context:
+   - Look for explicit dataset name in user_hints.user_text
+   - If not found, infer from the scientific context
+   - Keep it short and descriptive
+
+4. MISSING FIELDS — omit rather than guess:
+   - If you cannot determine a field with reasonable confidence, omit it
+   - Never invent information not present in the input
+
+═══════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════
+
 {
-  "action": "create|update",
   "dataset_description": {
     "Name": "...",
     "BIDSVersion": "1.10.0",
     "DatasetType": "raw",
-    "License": "PD",
-    "Authors": ["Institution or Author Name"]
+    "Authors": ["First Last", "First Last"]
   },
-  "extraction_log": {...},
+  "raw_license": "CC0",
+  "extraction_log": {
+    "Name": "inferred from user_text: '...'",
+    "raw_license": "found in user_text: 'License: CC0'",
+    "Authors": "extracted from citation in user_text"
+  },
   "questions": []
-}"""
+}
+
+Notes:
+- raw_license goes at the TOP LEVEL (not inside dataset_description)
+- dataset_description should NOT contain a "License" field — Python adds it after normalization
+- BIDSVersion must always be "1.10.0"
+- DatasetType must always be "raw"
+- Output ONLY valid JSON, no extra text, no markdown fences
+"""
 
 PROMPT_TRIO_README = """Generate README.md for BIDS dataset.
 
@@ -186,271 +467,253 @@ Output JSON (ONLY valid JSON):
 
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
-╔═══════════════════════════════════════════════════════════════════════════╗
-║ MISSION: Design a BIDS conversion plan by analyzing filename patterns    ║
-║          and user descriptions to identify subject groupings              ║
-╚═══════════════════════════════════════════════════════════════════════════╝
+═══════════════════════════════════════════════════════════════════════
+SUPPORTED FORMATS AND CONVERSION RULES (v10 - CRITICAL)
+═══════════════════════════════════════════════════════════════════════
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REASONING METHODOLOGY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Step 1: READ USER DESCRIPTION
-Look for explicit grouping information in user_hints.user_text:
-- Number of groups mentioned
-- Type of grouping (age, condition, timepoint, etc.)
-- Key distinguishing terms
-
-Step 2: ANALYZE FILENAME PATTERNS
-Examine sample_files to find discriminative tokens:
-- Look at token_positions to see which position varies
-- Identify tokens that DISTINGUISH different groups
-- Common patterns: age codes (neo, 1yr, 2yr), IDs (001, 002), conditions (pre, post)
-
-Step 3: CROSS-VALIDATE
-Compare user description with filename patterns:
-- Do the patterns match the user's description?
-- How many unique discriminative tokens exist?
-
-Step 4: GENERATE ASSIGNMENT RULES
-Create rules using EXACT tokens from filenames (NOT semantic interpretations)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL: EXACT TOKEN MATCHING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-When generating assignment_rules, use the EXACT tokens from sample_files:
-
-✓ CORRECT (uses actual filename tokens):
-  sample_files: ["infant-neo-aal.nii", "infant-1yr-aal.nii"]
+MRI FORMATS (modality: mri):
+  Input formats:
+    • DICOM (.dcm)           → Convert to NIfTI using dcm2niix
+    • NIfTI (.nii, .nii.gz)  → Already BIDS-ready, copy directly
+    • JNIfTI (.jnii, .bnii)  → Convert to NIfTI using jnifti_converter
   
+  BIDS output: .nii.gz files only
+
+fNIRS FORMATS (modality: nirs):
+  Input formats:
+    • SNIRF (.snirf)         → Already BIDS-ready, copy directly
+    • Homer3 (.nirs)         → Convert to SNIRF
+    • MATLAB (.mat)          → Convert to SNIRF
+  
+  BIDS output: .snirf files only
+
+═══════════════════════════════════════════════════════════════════════
+CRITICAL RULES FOR .mat FILES
+═══════════════════════════════════════════════════════════════════════
+
+.mat files are AMBIGUOUS - they can contain EITHER MRI or fNIRS data!
+
+Decision logic:
+1. Check user_hints.modality_hint:
+   - If "nirs" → treat as fNIRS, set convert_to: "snirf"
+   - If "mri" → treat as MRI voxel data (rare, needs special handling)
+
+2. Check user_hints.user_text for keywords:
+   - Keywords indicating fNIRS: "fNIRS", "NIRS", "optodes", "channels", "oxygenation"
+   - Keywords indicating MRI: "MRI", "anatomical", "voxels", "brain volume"
+
+3. Default assumption:
+   - If modality_hint = "nirs" → .mat is fNIRS data
+   - Otherwise → ask user for clarification
+
+EXAMPLE for .mat in fNIRS dataset:
+  user_hints:
+    modality_hint: "nirs"
+  
+  → Decision: .mat files are fNIRS data
+  
+  mappings:
+    - modality: nirs
+      match: ['*.mat', '**/*.mat']
+      format_ready: false     # ← MUST be false (needs conversion)
+      convert_to: snirf       # ← Specify SNIRF as target
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_task-rest_nirs.snirf'
+
+═══════════════════════════════════════════════════════════════════════
+FORMAT_READY AND CONVERT_TO RULES
+═══════════════════════════════════════════════════════════════════════
+
+format_ready: true (file is already BIDS-compliant, just copy):
+  - MRI: .nii, .nii.gz files
+  - fNIRS: .snirf files
+
+format_ready: false (file needs conversion):
+  - MRI: .dcm (convert_to: nifti), .jnii/.bnii (convert_to: nifti)
+  - fNIRS: .mat (convert_to: snirf), .nirs (convert_to: snirf)
+
+convert_to values:
+  - "none": No conversion, direct copy (only when format_ready: true)
+  - "nifti": Convert to NIfTI format (for DICOM, JNIfTI)
+  - "snirf": Convert to SNIRF format (for .mat, .nirs)
+
+CRITICAL EXAMPLES:
+
+✓ CORRECT - fNIRS .mat files:
+  mappings:
+    - modality: nirs
+      match: ['*.mat']
+      format_ready: false
+      convert_to: snirf
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_task-rest_nirs.snirf'
+
+✓ CORRECT - SNIRF files (already ready):
+  mappings:
+    - modality: nirs
+      match: ['*.snirf']
+      format_ready: true
+      convert_to: none
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_task-rest_nirs.snirf'
+
+✗ WRONG - treating .mat as ready:
+  mappings:
+    - modality: nirs
+      match: ['*.mat']
+      format_ready: true    # ← WRONG! .mat needs conversion
+      convert_to: none      # ← WRONG! Must specify snirf
+
+✓ CORRECT - DICOM files:
+  mappings:
+    - modality: mri
+      match: ['*.dcm']
+      format_ready: false
+      convert_to: nifti
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_T1w.nii.gz'
+
+═══════════════════════════════════════════════════════════════════════
+CORE PRINCIPLE: CONTEXT-DRIVEN REASONING
+═══════════════════════════════════════════════════════════════════════
+
+You receive THREE sources of information:
+1. user_hints.user_text      - Human's description of the dataset
+2. user_hints.modality_hint  - Explicit modality (mri/nirs/mixed)
+3. sample_files               - Representative filenames
+4. python_subject_analysis    - Statistical pattern detection
+
+YOUR JOB: Synthesize ALL sources to understand the TRUE dataset structure.
+
+CRITICAL DECISION TREE for .mat files:
+
+1. Check modality_hint:
+   - If "nirs" → modality: nirs, convert_to: snirf
+   - If "mri" → modality: mri (may need voxel mapping plan)
+   - If "mixed" or None → Check user_text for keywords
+
+2. Check user_text for fNIRS keywords:
+   - "fNIRS", "NIRS", "optodes", "channels" → treat as fNIRS
+   - "MRI", "anatomical", "voxels" → treat as MRI
+
+3. If still uncertain:
+   - Generate blocking question asking user to clarify
+
+═══════════════════════════════════════════════════════════════════════
+SUBJECT ID STRATEGY
+═══════════════════════════════════════════════════════════════════════
+
+Check python_subject_analysis.id_mapping if available.
+
+Strategy 1: NUMERIC - Use sub-1, sub-2, ... (add original_id to metadata)
+Strategy 2: SEMANTIC - Preserve original IDs (sub-neo, sub-Beijing001)
+
+Choose based on:
+- Dataset size (>10 subjects → numeric)
+- Multi-site data (→ semantic to preserve site info)
+- Meaningful short IDs (→ semantic)
+
+CRITICAL: SUBJECT ID FORMAT
+
+In assignment_rules, the 'subject' field should be BARE ID without 'sub-' prefix:
+
+✓ CORRECT:
   assignment_rules:
-    - subject: 'neo'
-      original: 'neo'           # ← EXACT token from filename
-      match: ['*neo*']
-    - subject: '1yr'
-      original: '1yr'           # ← EXACT token from filename
-      match: ['*1yr*']
+    - subject: '1'          # ← Just the number
+      original: 'BZZ021'
+      match: ['*BZZ021*']
+  
+  Result: executor creates "sub-1" (correct)
 
-✗ WRONG (uses semantic interpretation):
+✗ WRONG:
   assignment_rules:
-    - subject: 'neo'
-      original: 'neonate'       # ← NOT in filenames!
-      match: ['*neo*']          # ← Pattern is right but 'original' is wrong
+    - subject: 'sub-1'      # ← Don't add 'sub-' here!
+      original: 'BZZ021'
+      match: ['*BZZ021*']
+  
+  Result: executor creates "sub-sub-1" (double prefix!)
 
-WHY THIS MATTERS:
-The executor uses BOTH 'match' and 'original' for matching:
-1. First tries 'match' patterns (glob-style)
-2. Falls back to 'original' (substring search)
-
-Both must contain actual filename tokens, not semantic names!
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE ANALYSIS WORKFLOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Given input:
-  user_text: "Atlas with 3 age groups: neonates, 1-year-olds, 2-year-olds"
-  sample_files: [
-    "infant-neo-aal.nii",
-    "infant-neo-seg-gm.nii",
-    "infant-1yr-aal.nii",
-    "infant-1yr-seg-gm.nii",
-    "infant-2yr-aal.nii",
-    "infant-2yr-seg-gm.nii"
-  ]
-  token_positions: {
-    "0": {"infant": 27},
-    "1": {"neo": 9, "1": 9, "2": 9}
-  }
-
-REASONING:
-1. User says "3 age groups" → expect 3 subjects
-2. Position 0: all files have "infant" (common prefix, NOT discriminative)
-3. Position 1: three tokens appear equally (neo=9, 1=9, 2=9)
-4. Position 1 tokens are DISCRIMINATIVE → these define subjects
-5. Actual tokens in files: "neo", "1yr", "2yr" (from sample_files)
-
-OUTPUT:
-subjects:
-  labels: ['neo', '1yr', '2yr']  # Use actual tokens
-  count: 3
-
-assignment_rules:
-  - subject: 'neo'
-    original: 'neo'        # ← EXACT token
-    match: ['*neo*']
-  - subject: '1yr'
-    original: '1yr'        # ← EXACT token (includes 'yr')
-    match: ['*1yr*']
-  - subject: '2yr'
-    original: '2yr'        # ← EXACT token (includes 'yr')
-    match: ['*2yr*']
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-COMMON PATTERNS AND HOW TO HANDLE THEM
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Pattern 1: Age/Condition Groups (Flat structure)
-─────────────────────────────────────────────────
-Files: template-young-*.nii, template-old-*.nii
-→ 2 subjects: 'young' and 'old'
-→ Use exact tokens: original: 'young', match: ['*young*']
-
-Pattern 2: Numeric Patient IDs
-───────────────────────────────
-Files: patient001-T1.nii, patient002-T1.nii
-→ Many subjects (001, 002, ...)
-→ Use exact IDs: original: '001', match: ['*001*']
-
-Pattern 3: Site-Subject Structure
-──────────────────────────────────
-Files: Beijing_sub001/anat/scan.nii
-→ Directory-based
-→ Use directory: original: 'Beijing_sub001', match: ['**/Beijing_sub001/**']
-
-Pattern 4: Single Template/Atlas
-─────────────────────────────────
-Files: MNI152_T1_1mm.nii, MNI152_T1_2mm.nii
-→ 1 subject (different resolutions of same template)
-→ Use template name: original: 'MNI152', match: ['*MNI152*']
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT REQUIREMENTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+═══════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════
 
 subjects:
-  labels: [list of subject IDs using EXACT filename tokens]
-  count: total number
+  labels: [list of BIDS IDs without 'sub-' prefix]
+  count: N
   source: llm_analysis
+  id_strategy: numeric / semantic
 
 assignment_rules:
-  - subject: 'exact_token'     # Subject ID (from filename)
-    original: 'exact_token'    # MUST be exact token from filename
-    match: ['*exact_token*']   # Glob pattern using same token
+  - subject: 'bids_id'    # Bare ID (no 'sub-' prefix)
+    original: 'token'     # EXACT token from filenames
+    match: ['*token*']    # Glob pattern
+
+participant_metadata:
+  'bids_id':              # Must match subjects.labels
+    original_id: 'xxx'    # If using numeric strategy
+    site: 'xxx'           # If multi-site
+    age: 'xxx'            # If available
+    sex: 'M'              # If available
 
 mappings:
-  - modality: mri
-    match: ['*.nii', '*.nii.gz', '**/*.nii', '**/*.nii.gz']
-    format_ready: true
-    convert_to: none
+  - modality: mri         # OR nirs
+    match: ['*.nii.gz', '**/*.dcm']  # Match patterns
+    format_ready: true    # true ONLY for .nii/.nii.gz (MRI) or .snirf (fNIRS)
+    convert_to: none      # OR 'nifti' (DICOM/JNIfTI) OR 'snirf' (.mat/.nirs)
     filename_rules:
-      - match_pattern: '.*pattern.*'
-        bids_template: 'sub-SUBJECTID_suffix.nii.gz'
+      - match_pattern: '.*T1.*'
+        bids_template: 'sub-X_T1w.nii.gz'  # MRI example
+      # OR
+      - match_pattern: '.*rest.*'
+        bids_template: 'sub-X_task-rest_nirs.snirf'  # fNIRS example
 
-CRITICAL RULES:
-1. 'original' field = EXACT token from actual filenames
-2. 'match' patterns = glob patterns using SAME exact token
-3. Use 'sub-X' in bids_template where X will be replaced with subject ID
-4. mappings.match must include BOTH root and nested patterns:
-   ['*.nii', '**/*.nii'] not just ['**/*.nii']
+COMPLETE EXAMPLES:
 
-OUTPUT: Raw YAML only (no markdown fences, no extra text)
+Example 1: MRI dataset with DICOM files
+  mappings:
+    - modality: mri
+      match: ['*.dcm', '**/*.dcm']
+      format_ready: false
+      convert_to: nifti
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_T1w.nii.gz'
 
-Now analyze the evidence and generate the plan.
+Example 2: fNIRS dataset with .mat files
+  mappings:
+    - modality: nirs
+      match: ['*.mat', '**/*.mat']
+      format_ready: false
+      convert_to: snirf
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_task-rest_nirs.snirf'
+
+Example 3: Mixed dataset
+  mappings:
+    - modality: mri
+      match: ['*.nii.gz']
+      format_ready: true
+      convert_to: none
+      filename_rules:
+        - match_pattern: '.*T1.*'
+          bids_template: 'sub-X_T1w.nii.gz'
+    
+    - modality: nirs
+      match: ['*.mat']
+      format_ready: false
+      convert_to: snirf
+      filename_rules:
+        - match_pattern: '.*'
+          bids_template: 'sub-X_task-rest_nirs.snirf'
+
+OUTPUT: Raw YAML only (no markdown, no explanation)
 """
 
-
-PROMPT_NIRS_DRAFT = """fNIRS-to-SNIRF mapper (Draft).
-
-Output JSON (ONLY valid JSON):
-{
-  "draft": {...},
-  "confidence": 0.8,
-  "questions": [...]
-}"""
-
-PROMPT_NIRS_NORMALIZE = """fNIRS-to-SNIRF mapper (Normalize).
-
-Output JSON (ONLY valid JSON):
-{
-  "normalized": {...},
-  "questions": [...]
-}"""
-
-PROMPT_MRI_VOXEL_DRAFT = """MRI voxelization planner (Draft).
-
-Output JSON (ONLY valid JSON):
-{
-  "volume_candidates": [...],
-  "meta_candidates": {...},
-  "confidence": 0.8
-}"""
-
-PROMPT_MRI_VOXEL_FINAL = """MRI voxelization planner (Final).
-
-Output JSON (ONLY valid JSON):
-{
-  "conversions": [...],
-  "questions": []
-}"""
-
-PROMPT_TRIO_DATASET_DESC = """You are a BIDS dataset_description.json generator.
-
-CRITICAL: Use user_hints.user_text to extract dataset information!
-
-CRITICAL RULES:
-- Authors MUST be array: ["Name 1", "Name 2", "Name 3"]
-- Funding MUST be array
-- EthicsApprovals MUST be array
-- DO NOT include empty strings "" or empty arrays []
-- License normalization: "CC BY 4.0" -> "CC-BY-4.0"
-
-Extract from user_hints.user_text:
-- Dataset name
-- Authors/institutions mentioned
-- Funding sources
-- License information (default to PD for public domain datasets)
-
-Input: {existing, documents, user_hints, counts_by_ext}
-
-Output JSON (ONLY valid JSON, no extra text):
-{
-  "action": "create|update",
-  "dataset_description": {
-    "Name": "...",
-    "BIDSVersion": "1.10.0",
-    "DatasetType": "raw",
-    "License": "PD",
-    "Authors": ["Institution or Author Name"]
-  },
-  "extraction_log": {...},
-  "questions": []
-}"""
-
-PROMPT_TRIO_README = """Generate README.md for BIDS dataset.
-
-CRITICAL: Use user_hints.user_text as primary source for README content.
-
-Create comprehensive README with sections:
-- Overview
-- Dataset Description  
-- Data Acquisition
-- File Organization
-- Usage Notes
-- References
-
-Output: Direct Markdown text (no JSON wrapper)"""
-
-PROMPT_TRIO_PARTICIPANTS = """You are a BIDS participants.tsv generator.
-
-CRITICAL: Extract participant metadata from user_hints.user_text!
-
-Examples:
-- "1 male, 1 female" → sex column: M, F
-- "ages 25-65" → age column
-- "patients and controls" → group column
-
-Return column structure (Python will generate rows):
-
-Output JSON:
-{
-  "columns": [
-    {"name": "participant_id", "required": true},
-    {"name": "sex", "levels": ["M", "F"]},
-    {"name": "group", "levels": ["patient", "control"]}
-  ]
-}"""
 
 # ============================================================================
 # LLM CALL FUNCTIONS

@@ -13,22 +13,27 @@ from llm import llm_trio_dataset_description, llm_trio_readme, llm_trio_particip
 
 DEBUG_MODE = True
 
+
+# ============================================================================
+# Trio status check
+# ============================================================================
+
 def check_trio_status(out_dir: Path) -> Dict[str, Any]:
     status = {
         "dataset_description": {"exists": False, "path": None, "data": None},
-        "readme": {"exists": False, "path": None, "variant": None},
-        "participants": {"exists": False, "path": None}
+        "readme":               {"exists": False, "path": None, "variant": None},
+        "participants":         {"exists": False, "path": None}
     }
-    
+
     dd_path = out_dir / TRIO_DATASET_DESC
     if dd_path.exists():
         status["dataset_description"]["exists"] = True
         status["dataset_description"]["path"] = dd_path
         try:
             status["dataset_description"]["data"] = read_json(dd_path)
-        except:
+        except Exception:
             pass
-    
+
     readme_variants = ['readme', 'readme.md', 'readme.txt', 'readme.rst']
     for item in out_dir.iterdir():
         if item.is_file() and item.name.lower() in readme_variants:
@@ -36,76 +41,151 @@ def check_trio_status(out_dir: Path) -> Dict[str, Any]:
             status["readme"]["path"] = item
             status["readme"]["variant"] = item.name
             break
-    
+
     parts_path = out_dir / TRIO_PARTICIPANTS
     if parts_path.exists():
         status["participants"]["exists"] = True
         status["participants"]["path"] = parts_path
-    
+
     return status
 
+
+# ============================================================================
+# License normalization — complete alias table
+# ============================================================================
+
 def normalize_license_locally(license_str: str) -> Optional[str]:
+    """
+    Normalize ANY license string to BIDS canonical form.
+
+    Strategy:
+    1. Strip input: remove hyphens / spaces / dots / underscores, uppercase
+    2. Match against a complete alias table
+    3. Return canonical BIDS value, or 'Non-Standard' if unrecognized
+
+    Handles:
+    - Exact canonical: "CC0", "CC-BY-4.0"
+    - Case variants:   "cc0", "Cc-By-4.0"
+    - Natural language: "creative commons zero", "public domain"
+    - Verbose forms:   "Creative Commons Attribution 4.0 International"
+    - Common typos:    "CC BY 4.0", "CCBY4"
+    """
     if not license_str:
         return None
-    
-    normalized = re.sub(r'[-\s]+', '', license_str.upper())
-    
-    mappings = {
-        'PDDL': ['PDDL', 'PDDL10', 'PUBLICDOMAINDEDICATIONLICENSE'],
-        'CC0': ['CC0', 'CC010', 'CREATIVECOMMONSZERO'],
-        'PD': ['PD', 'PUBLICDOMAIN'],
-        'CC-BY-4.0': ['CCBY40', 'CCBY4', 'CREATIVECOMMONSATTRIBUTION4'],
-        'CC-BY-SA-4.0': ['CCBYSA40', 'CCBYSA4', 'CREATIVECOMMONSATTRIBUTIONSHAREALIKE4'],
-        'BSD-3-Clause': ['BSD3CLAUSE', 'BSD3', 'BSDNEW', 'BSDREVISED'],
-        'BSD-2-Clause': ['BSD2CLAUSE', 'BSD2', 'BSDORIGINAL', 'BSDOLD'],
-        'MIT': ['MIT', 'MITLICENSE'],
-        'GPL-2.0': ['GPL20', 'GPL2', 'GNUGPL2'],
-        'GPL-2.0+': ['GPL20+', 'GPL2+', 'GPL2ORLATER'],
-        'GPL-3.0': ['GPL30', 'GPL3', 'GNUGPL3'],
-        'GPL-3.0+': ['GPL30+', 'GPL3+', 'GPL3ORLATER'],
-        'LGPL-3.0+': ['LGPL30+', 'LGPL3+'],
-        'MPL': ['MPL', 'MPL20', 'MOZILLAPUBLICLICENSE'],
-        'CDDL-1.0': ['CDDL', 'CDDL10'],
-        'GFDL-1.3': ['GFDL', 'GFDL13'],
-        'CC-BY-NC-4.0': ['CCBYNC40', 'CCBYNC4'],
-        'CC-BY-NC-SA-4.0': ['CCBYNCSA40', 'CCBYNCSA4'],
-        'CC-BY-NC-ND-4.0': ['CCBYNCND40', 'CCBYNCND4']
+
+    # Normalize: remove separators and uppercase
+    key = re.sub(r'[\s\-\._]+', '', license_str.upper())
+
+    ALIAS_TABLE: Dict[str, List[str]] = {
+        'CC0': [
+            'CC0', 'CC010', 'CC01',
+            'CREATIVECOMMONSZERO', 'CREATIVECOMMONS0',
+            'CC0UNIVERSALPUBLICDOMAIN', 'CC010UNIVERSAL',
+            'ZERORIGHTSPUBLICDOMAIN', 'CC0LICENSE',
+        ],
+        'PD': [
+            'PD', 'PUBLICDOMAIN', 'PUBLIEDOMAIN',
+        ],
+        'PDDL': [
+            'PDDL', 'PDDL10', 'OPENDATACOMMONSPDD',
+            'PUBLICDOMAINDEDICATIONLICENSE',
+        ],
+        'CC-BY-4.0': [
+            'CCBY40', 'CCBY4', 'CCBY',
+            'CREATIVECOMMONSATTRIBUTION40',
+            'CREATIVECOMMONSATTRIBUTION4',
+            'CREATIVECOMMONSATTRIBUTION40INTERNATIONAL',
+        ],
+        'CC-BY-SA-4.0': [
+            'CCBYSA40', 'CCBYSA4', 'CCBYSA',
+            'CREATIVECOMMONSATTRIBUTIONSHAREALIKE40',
+            'CREATIVECOMMONSATTRIBUTIONSHAREALIKE4',
+        ],
+        'CC-BY-NC-4.0': [
+            'CCBYNC40', 'CCBYNC4', 'CCBYNC',
+            'CREATIVECOMMONSATTRIBUTIONNONCOMMERCIAL40',
+            'CREATIVECOMMONSATTRIBUTIONNONCOMMERCIAL4',
+        ],
+        'CC-BY-NC-SA-4.0': [
+            'CCBYNCSA40', 'CCBYNCSA4',
+            'CREATIVECOMMONSATTRIBUTIONNONCOMMERCIALSHAREALIKE40',
+        ],
+        'CC-BY-NC-ND-4.0': [
+            'CCBYNCND40', 'CCBYNCND4',
+            'CREATIVECOMMONSATTRIBUTIONNONCOMMERCIALNODERIV40',
+        ],
+        'MIT': [
+            'MIT', 'MITLICENSE', 'MITOPENSOURCE',
+        ],
+        'BSD-3-Clause': [
+            'BSD3CLAUSE', 'BSD3', 'BSDNEW', 'BSDREVISED', 'BSD3CLAUSELICENSE',
+        ],
+        'BSD-2-Clause': [
+            'BSD2CLAUSE', 'BSD2', 'BSDORIGINAL', 'BSDOLD', 'BSDSIMPLIFIED',
+        ],
+        'GPL-2.0': [
+            'GPL20', 'GPL2', 'GNUGPL2', 'GNUGENERALPUBLICLICENSE2',
+        ],
+        'GPL-2.0+': [
+            'GPL20+', 'GPL2+', 'GPL2ORLATER', 'GPL20ORLATER',
+        ],
+        'GPL-3.0': [
+            'GPL30', 'GPL3', 'GNUGPL3', 'GNUGENERALPUBLICLICENSE3',
+        ],
+        'GPL-3.0+': [
+            'GPL30+', 'GPL3+', 'GPL3ORLATER', 'GPL30ORLATER',
+        ],
+        'LGPL-3.0+': [
+            'LGPL30+', 'LGPL3+', 'LGPL3ORLATER', 'GNULЕССЕРГPL3',
+        ],
+        'MPL': [
+            'MPL', 'MPL20', 'MPL2', 'MOZILLAPUBLICLICENSE',
+            'MOZILLAPUBLICLICENSE20',
+        ],
+        'CDDL-1.0': [
+            'CDDL', 'CDDL10', 'COMMONDEVELOPMENTANDDISTRIBUTIONLICENSE',
+        ],
+        'GFDL-1.3': [
+            'GFDL', 'GFDL13', 'GNUFREEDOCUMENTATIONLICENSE13',
+        ],
+        'Non-Standard': [
+            'NONSTANDARD', 'NONSTANDARDLICENSE', 'CUSTOM', 'OTHER',
+            'PROPRIETARY', 'RESTRICTED',
+        ],
     }
-    
-    for standard, variants in mappings.items():
-        if normalized in variants:
-            return standard
-    
+
+    for canonical, variants in ALIAS_TABLE.items():
+        if key in variants:
+            return canonical
+
     return 'Non-Standard'
 
-def _parse_llm_json_response(response_text: str, step_name: str, show_preview: bool = True) -> Optional[Dict[str, Any]]:
-    """
-    Parse LLM JSON response with multiple fallback strategies.
-    
-    Args:
-        response_text: Raw LLM response
-        step_name: Step name for logging
-        show_preview: Whether to show preview on failure (False for large responses)
-    """
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+def _parse_llm_json_response(
+    response_text: str,
+    step_name: str,
+    show_preview: bool = True
+) -> Optional[Dict[str, Any]]:
     if not response_text or not response_text.strip():
         warn(f"{step_name}: LLM returned empty response")
         return None
-    
+
     text = response_text.strip()
-    
-    # Remove markdown fences
+
+    # Strip markdown fences
     if text.startswith("```json"):
         text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
     elif text.startswith("```"):
         lines = text.split('\n')
         text = '\n'.join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
     # Try direct parse
     try:
         obj = json.loads(text)
@@ -115,53 +195,45 @@ def _parse_llm_json_response(response_text: str, step_name: str, show_preview: b
     except json.JSONDecodeError as e:
         if DEBUG_MODE:
             debug(f"{step_name}: Direct parse failed: {e}")
-        
-        # Try raw_decode for extra text
-        if "Extra data" in str(e) or "Expecting" in str(e):
-            try:
-                decoder = json.JSONDecoder()
-                obj, idx = decoder.raw_decode(text)
-                if DEBUG_MODE:
-                    debug(f"{step_name}: ✓ Extracted JSON using raw_decode")
-                return obj
-            except Exception as e2:
-                if DEBUG_MODE:
-                    debug(f"{step_name}: raw_decode failed: {e2}")
-        
-        # Try regex extraction
-        try:
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                obj = json.loads(match.group(0))
-                if DEBUG_MODE:
-                    debug(f"{step_name}: ✓ Extracted JSON using regex")
-                return obj
-        except:
-            pass
-        
-        # All strategies failed
-        warn(f"{step_name}: Failed to parse JSON: {e}")
-        if show_preview:
-            warn(f"Response preview: {text[:500]}...")
-        else:
-            warn(f"Response length: {len(text)} chars (preview suppressed)")
-        return None
+
+    # Try raw_decode
+    try:
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text)
+        if DEBUG_MODE:
+            debug(f"{step_name}: ✓ JSON via raw_decode")
+        return obj
+    except Exception:
+        pass
+
+    # Try regex extraction
+    try:
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            obj = json.loads(m.group(0))
+            if DEBUG_MODE:
+                debug(f"{step_name}: ✓ JSON via regex")
+            return obj
+    except Exception:
+        pass
+
+    warn(f"{step_name}: Failed to parse JSON")
+    if show_preview:
+        warn(f"Response preview: {text[:500]}...")
+    return None
+
 
 def _is_markdown_content(text: str) -> bool:
-    text = text.strip()
+    t = text.strip()
     return any([
-        text.startswith('#'),
-        text.startswith('##'),
-        '# ' in text[:100],
-        '\n## ' in text[:200],
-        text.startswith('**'),
-        '- ' in text[:100],
-        '\n- ' in text[:200],
+        t.startswith('#'), t.startswith('##'),
+        '# ' in t[:100], '\n## ' in t[:200],
+        t.startswith('**'), '- ' in t[:100], '\n- ' in t[:200],
     ])
+
 
 def _validate_dataset_description(dd: Dict[str, Any]) -> Tuple[bool, List[str]]:
     issues = []
-    
     if not dd.get("Name"):
         issues.append("Missing required field: Name")
     if not dd.get("BIDSVersion"):
@@ -169,454 +241,339 @@ def _validate_dataset_description(dd: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if not dd.get("License"):
         issues.append("Missing required field: License")
     elif dd.get("License") not in LICENSE_WHITELIST:
-        issues.append(f"License '{dd.get('License')}' not in BIDS whitelist (will be auto-normalized)")
-    
-    if "Authors" in dd and not isinstance(dd["Authors"], list):
-        issues.append(f"Authors must be an array, found: {type(dd['Authors']).__name__}")
-    if "Funding" in dd and not isinstance(dd["Funding"], list):
-        issues.append(f"Funding must be an array, found: {type(dd['Funding']).__name__}")
-    if "EthicsApprovals" in dd and not isinstance(dd["EthicsApprovals"], list):
-        issues.append(f"EthicsApprovals must be an array, found: {type(dd['EthicsApprovals']).__name__}")
-    
+        issues.append(f"License '{dd.get('License')}' not in BIDS whitelist")
+    for f in ["Authors", "Funding", "EthicsApprovals"]:
+        if f in dd and not isinstance(dd[f], list):
+            issues.append(f"{f} must be an array")
     if dd.get("License") == "Non-Standard" and not dd.get("DataLicense"):
         issues.append("License='Non-Standard' requires DataLicense field")
-    
-    empty_fields = [k for k, v in dd.items() if v == "" or v == []]
-    if empty_fields:
-        issues.append(f"Empty fields (will be removed): {', '.join(empty_fields)}")
-    
-    is_valid = len([i for i in issues if "Missing required" in i or "must be an array" in i]) == 0
+    empty = [k for k, v in dd.items() if v == "" or v == []]
+    if empty:
+        issues.append(f"Empty fields (will be removed): {', '.join(empty)}")
+    is_valid = not any("Missing required" in i or "must be an array" in i for i in issues)
     return is_valid, issues
+
 
 def _fix_field_types(dd: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     fixed = dd.copy()
     fixes = []
-    
-    # Fix Authors
-    if "Authors" in fixed:
-        if isinstance(fixed["Authors"], str):
-            if fixed["Authors"].strip():
-                fixed["Authors"] = [fixed["Authors"]]
-                fixes.append("Converted Authors from string to array")
+    for field in ["Authors", "Funding", "EthicsApprovals"]:
+        if field not in fixed:
+            continue
+        val = fixed[field]
+        if isinstance(val, str):
+            if val.strip():
+                fixed[field] = [val]
+                fixes.append(f"Converted {field} from string to array")
             else:
-                del fixed["Authors"]
-        elif isinstance(fixed["Authors"], list) and len(fixed["Authors"]) == 0:
-            del fixed["Authors"]
-    
-    # Fix Funding
-    if "Funding" in fixed:
-        if isinstance(fixed["Funding"], str):
-            if fixed["Funding"].strip():
-                fixed["Funding"] = [fixed["Funding"]]
-                fixes.append("Converted Funding from string to array")
-            else:
-                del fixed["Funding"]
-        elif isinstance(fixed["Funding"], list) and len(fixed["Funding"]) == 0:
-            del fixed["Funding"]
-    
-    # Fix EthicsApprovals
-    if "EthicsApprovals" in fixed:
-        if isinstance(fixed["EthicsApprovals"], str):
-            if fixed["EthicsApprovals"].strip():
-                fixed["EthicsApprovals"] = [fixed["EthicsApprovals"]]
-                fixes.append("Converted EthicsApprovals from string to array")
-            else:
-                del fixed["EthicsApprovals"]
-        elif isinstance(fixed["EthicsApprovals"], list) and len(fixed["EthicsApprovals"]) == 0:
-            del fixed["EthicsApprovals"]
-    
-    # Remove empty strings
-    keys_to_remove = [k for k, v in fixed.items() 
-                      if v == "" and k not in ["Name", "BIDSVersion", "DatasetType", "License"]]
-    for key in keys_to_remove:
-        del fixed[key]
-    
+                del fixed[field]
+        elif isinstance(val, list) and len(val) == 0:
+            del fixed[field]
+    keys_rm = [k for k, v in fixed.items()
+               if v == "" and k not in ("Name", "BIDSVersion", "DatasetType", "License")]
+    for k in keys_rm:
+        del fixed[k]
     return fixed, fixes
 
-def _merge_dataset_description(existing: Dict[str, Any], new: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    merged = existing.copy()
-    notes = []
-    
-    for key, new_value in new.items():
-        if key == "BIDSVersion":
-            if merged.get(key) != "1.10.0":
-                merged[key] = "1.10.0"
-                notes.append("Updated BIDSVersion to 1.10.0")
-            continue
-        
-        existing_value = existing.get(key)
-        
-        if not existing_value and new_value:
-            if isinstance(new_value, (list, str)):
-                if new_value:
-                    merged[key] = new_value
-                    notes.append(f"Added field '{key}'")
-            else:
-                merged[key] = new_value
-                notes.append(f"Added field '{key}'")
-        elif existing_value and key == "License":
-            if existing_value not in LICENSE_WHITELIST:
-                normalized = normalize_license_locally(existing_value)
-                if normalized and normalized in LICENSE_WHITELIST:
-                    merged[key] = normalized
-                    notes.append(f"Normalized License: '{existing_value}' -> '{normalized}'")
-    
-    return merged, notes
+
+# ============================================================================
+# dataset_description.json
+# ============================================================================
 
 def generate_dataset_description(model: str, bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+    """
+    Generate dataset_description.json.
+
+    Design:
+    - LLM does ALL semantic extraction (Name, Authors, License, etc.)
+      It outputs a 'raw_license' field (natural language, no format constraints)
+    - Python does the final normalization:
+        raw_license → normalize_license_locally() → BIDS canonical
+    - This is universally robust: user can write anything, LLM understands it,
+      Python maps it to the exact BIDS value.
+
+    Priority for final value:
+        Python-normalized License > existing_dd > llm_dd (other fields)
+    """
     info("=== Generating dataset_description.json ===")
-    
     dd_path = out_dir / TRIO_DATASET_DESC
-    warnings = []
-    
-    # Load existing
+    warnings_list: List[str] = []
+
+    # ── Step 1: Load existing file ────────────────────────────────────
     existing_dd = None
     if dd_path.exists():
         try:
             existing_dd = read_json(dd_path)
             info(f"Found existing file: {dd_path}")
-            
-            # Validate and fix
-            is_valid, validation_issues = _validate_dataset_description(existing_dd)
-            if not is_valid or validation_issues:
-                info("Validating existing file format:")
-                for issue in validation_issues:
+            _, issues = _validate_dataset_description(existing_dd)
+            if issues:
+                for issue in issues:
                     info(f"  ⚠ {issue}")
-                
-                fixed_dd, fixes = _fix_field_types(existing_dd)
-                if fixes:
-                    info("Auto-fixing field types:")
-                    for fix in fixes:
-                        info(f"  ✓ {fix}")
-                    existing_dd = fixed_dd
-            else:
-                info("✓ Existing file format is valid")
+                existing_dd, fixes = _fix_field_types(existing_dd)
+                for fix in fixes:
+                    info(f"  ✓ {fix}")
         except Exception as e:
             warn(f"Could not read existing file: {e}")
-            existing_dd = None
-    
-    # Call LLM
+
+    # ── Step 2: Call LLM ──────────────────────────────────────────────
+    # LLM receives full user_text and documents.
+    # Key instruction: output 'raw_license' as a plain string
+    # (whatever the user said, verbatim or paraphrased — no format required).
+    # Python will normalize it afterwards.
     payload = json.dumps({
-        "user_hints": bundle.get("user_hints", {}),
-        "documents": bundle.get("documents", []),
+        "user_hints":    bundle.get("user_hints", {}),
+        "documents":     bundle.get("documents", []),
         "counts_by_ext": bundle.get("counts_by_ext", {}),
-        "existing": existing_dd
+        "existing":      existing_dd,
+        "task_instructions": (
+            "Extract dataset metadata from user_hints.user_text and documents. "
+            "For the license field: output it as 'raw_license' (plain string, "
+            "exactly what the user wrote or what the document says — "
+            "e.g. 'CC0', 'Creative Commons Zero', 'public domain', 'CC BY 4.0'). "
+            "Do NOT try to normalize the license yourself. "
+            "Python will handle normalization. "
+            "For Authors: extract ONLY from user_hints.user_text citations/references. "
+            "Do NOT extract authors from documents[]."
+        )
     }, ensure_ascii=False)
-    
+
     result = None
     llm_dd = None
-    
+    raw_license_from_llm: Optional[str] = None
+
     try:
         response_text = llm_trio_dataset_description(model, payload)
-        
         if DEBUG_MODE:
             debug(f"LLM response length: {len(response_text)} chars")
-        
         result = _parse_llm_json_response(response_text, "dataset_description")
-        
         if result:
             llm_dd = result.get("dataset_description", {})
+            # Extract raw_license from top-level or nested
+            raw_license_from_llm = (
+                result.get("raw_license") or
+                llm_dd.get("raw_license") or
+                llm_dd.get("License")      # fallback if LLM put it in License
+            )
             if DEBUG_MODE:
                 debug(f"LLM returned fields: {list(llm_dd.keys())}")
-        else:
-            warn("Failed to parse LLM response")
+                debug(f"raw_license from LLM: {raw_license_from_llm!r}")
     except Exception as e:
         warn(f"LLM call failed: {e}")
-    
-    # Merge data
-    final_dd = None
-    update_notes = []
-    
-    if llm_dd and existing_dd:
-        if llm_dd != existing_dd:
-            info("Merging LLM data with existing file...")
-            final_dd, update_notes = _merge_dataset_description(existing_dd, llm_dd)
-            if update_notes:
-                info("Updates from LLM:")
-                for note in update_notes:
-                    info(f"  • {note}")
-            else:
-                info("No new fields from LLM")
+
+    # ── Step 3: Python normalizes the license ─────────────────────────
+    # This is the ONLY place where license normalization happens.
+    # Input can be anything the LLM returned; output is always a BIDS value.
+    normalized_license: Optional[str] = None
+    if raw_license_from_llm:
+        normalized_license = normalize_license_locally(raw_license_from_llm)
+        info(f"  License: '{raw_license_from_llm}' → '{normalized_license}'")
+    elif existing_dd and existing_dd.get("License"):
+        # Try to normalize what's already in the existing file
+        existing_lic = existing_dd["License"]
+        normalized_license = normalize_license_locally(existing_lic)
+        if normalized_license != existing_lic:
+            info(f"  License (from existing): '{existing_lic}' → '{normalized_license}'")
         else:
-            info("LLM returned same data as existing")
-            final_dd = existing_dd.copy()
-    elif llm_dd and not existing_dd:
-        info("Creating new file from LLM data")
-        final_dd = llm_dd
-    elif not llm_dd and existing_dd:
-        warn("LLM failed to extract data, using existing file")
-        final_dd = existing_dd.copy()
-    else:
-        fatal("No data available")
+            normalized_license = existing_lic
+
+    # ── Step 4: Merge: existing_dd < llm_dd, then apply normalized license ──
+    base: Dict[str, Any] = {}
+
+    if llm_dd:
+        # Remove raw_license key if LLM put it there — we handle it separately
+        llm_dd_clean = {k: v for k, v in llm_dd.items()
+                        if k not in ("raw_license",)}
+        base.update(llm_dd_clean)
+
+    if existing_dd:
+        for k, v in existing_dd.items():
+            if v:
+                base[k] = v
+
+    # License: always use Python-normalized value (highest priority)
+    if normalized_license:
+        base["License"] = normalized_license
+
+    if not base:
+        fatal("No data available for dataset_description.json")
         return {"warnings": [], "questions": []}
-    
-    # Build final structure (only non-empty fields)
-    required_structure = {
-        "Name": final_dd.get("Name", ""),
+
+    # ── Step 5: Build final structure ─────────────────────────────────
+    final_dd: Dict[str, Any] = {
+        "Name":        base.get("Name", ""),
         "BIDSVersion": "1.10.0",
-        "DatasetType": final_dd.get("DatasetType", "raw"),
-        "License": final_dd.get("License", "")
+        "DatasetType": base.get("DatasetType", "raw"),
+        "License":     base.get("License", ""),
     }
-    
-    if final_dd.get("HEDVersion"):
-        required_structure["HEDVersion"] = final_dd.get("HEDVersion")
-    
-    # Authors: Must be array
-    if final_dd.get("Authors"):
-        authors = final_dd.get("Authors")
+
+    # Authors (must be array)
+    authors = base.get("Authors")
+    if authors:
         if isinstance(authors, str) and authors.strip():
-            required_structure["Authors"] = [authors]
-            info("✓ Converted Authors from string to array")
-        elif isinstance(authors, list) and len(authors) > 0:
-            required_structure["Authors"] = authors
-    
-    if final_dd.get("Acknowledgements"):
-        required_structure["Acknowledgements"] = final_dd.get("Acknowledgements")
-    if final_dd.get("HowToAcknowledge"):
-        required_structure["HowToAcknowledge"] = final_dd.get("HowToAcknowledge")
-    
-    # Funding: Must be array
-    if final_dd.get("Funding"):
-        funding = final_dd.get("Funding")
-        if isinstance(funding, str) and funding.strip():
-            required_structure["Funding"] = [funding]
-            info("✓ Converted Funding from string to array")
-        elif isinstance(funding, list) and len(funding) > 0:
-            required_structure["Funding"] = funding
-    
-    # EthicsApprovals: Must be array
-    if final_dd.get("EthicsApprovals"):
-        ethics = final_dd.get("EthicsApprovals")
-        if isinstance(ethics, str) and ethics.strip():
-            required_structure["EthicsApprovals"] = [ethics]
-            info("✓ Converted EthicsApprovals from string to array")
-        elif isinstance(ethics, list) and len(ethics) > 0:
-            required_structure["EthicsApprovals"] = ethics
-    
-    if final_dd.get("ReferencesAndLinks") and len(final_dd.get("ReferencesAndLinks")) > 0:
-        required_structure["ReferencesAndLinks"] = final_dd.get("ReferencesAndLinks")
-    if final_dd.get("DatasetDOI"):
-        required_structure["DatasetDOI"] = final_dd.get("DatasetDOI")
-    if final_dd.get("GeneratedBy") and len(final_dd.get("GeneratedBy")) > 0:
-        required_structure["GeneratedBy"] = final_dd.get("GeneratedBy")
-    if final_dd.get("SourceDatasets") and len(final_dd.get("SourceDatasets")) > 0:
-        required_structure["SourceDatasets"] = final_dd.get("SourceDatasets")
-    
-    if final_dd.get("License") == "Non-Standard" and final_dd.get("DataLicense"):
-        required_structure["DataLicense"] = final_dd.get("DataLicense")
-    
-    # Validate required fields
-    if not required_structure["Name"]:
-        warnings.append("WARNING: Missing 'Name' field (REQUIRED)")
-    
-    # License normalization
-    if not required_structure["License"]:
-        warnings.append(f"WARNING: Missing 'License' field (REQUIRED)")
-    elif required_structure["License"] not in LICENSE_WHITELIST:
-        original_license = required_structure["License"]
-        normalized = normalize_license_locally(original_license)
-        if normalized and normalized in LICENSE_WHITELIST:
-            info(f"✓ License normalized: '{original_license}' -> '{normalized}'")
-            required_structure["License"] = normalized
+            final_dd["Authors"] = [authors]
+        elif isinstance(authors, list) and authors:
+            final_dd["Authors"] = authors
+
+    # Optional fields
+    for field in ["Acknowledgements", "HowToAcknowledge", "Funding",
+                  "EthicsApprovals", "ReferencesAndLinks", "DatasetDOI",
+                  "HEDVersion", "GeneratedBy", "SourceDatasets"]:
+        val = base.get(field)
+        if val:
+            final_dd[field] = val
+
+    if base.get("License") == "Non-Standard" and base.get("DataLicense"):
+        final_dd["DataLicense"] = base["DataLicense"]
+
+    # ── Step 6: Validate ──────────────────────────────────────────────
+    if not final_dd.get("Name"):
+        warnings_list.append("WARNING: Missing 'Name' field (REQUIRED)")
+
+    lic = final_dd.get("License", "")
+    if not lic:
+        warnings_list.append(
+            "WARNING: License not found. "
+            "Add 'License: CC0' (or other) to --describe, "
+            "or include it in your dataset documentation."
+        )
+    elif lic not in LICENSE_WHITELIST:
+        # One more normalization attempt on the final value
+        again = normalize_license_locally(lic)
+        if again and again in LICENSE_WHITELIST:
+            final_dd["License"] = again
+            info(f"  ✓ License re-normalized: '{lic}' → '{again}'")
         else:
-            warnings.append(f"WARNING: License '{original_license}' not recognized")
-    
-    if required_structure.get("License") == "Non-Standard" and not required_structure.get("DataLicense"):
-        warnings.append("WARNING: License='Non-Standard' requires 'DataLicense' field")
-    
-    # Write file
-    write_json(dd_path, required_structure)
-    info(f"✓ {'Updated' if existing_dd else 'Created'}: {dd_path}")
-    
+            warnings_list.append(f"WARNING: License '{lic}' not in BIDS whitelist")
+
+    if final_dd.get("License") == "Non-Standard" and not final_dd.get("DataLicense"):
+        warnings_list.append("WARNING: License='Non-Standard' requires 'DataLicense' field")
+
+    # Remove empty strings / empty arrays
+    final_dd = {k: v for k, v in final_dd.items() if v != "" and v != []}
+
+    # ── Step 7: Write ─────────────────────────────────────────────────
+    write_json(dd_path, final_dd)
+    action = "Updated" if existing_dd else "Created"
+    info(f"✓ {action}: {dd_path}")
+    info(f"  License : {final_dd.get('License', 'MISSING')}")
+    info(f"  Name    : {final_dd.get('Name', 'MISSING')}")
+
     if result and "extraction_log" in result:
-        info("Metadata extraction sources:")
+        info("LLM extraction log:")
         for field, source in result["extraction_log"].items():
             info(f"  {field}: {source}")
-    
-    if result and "normalization_notes" in result:
-        for note in result["normalization_notes"]:
-            info(note)
-    
+
     if result and "warnings" in result:
-        for w in result["warnings"]:
-            warnings.append(w)
-    
-    return {"warnings": warnings, "questions": result.get("questions", []) if result else []}
+        warnings_list.extend(result["warnings"])
+
+    return {
+        "warnings": warnings_list,
+        "questions": result.get("questions", []) if result else []
+    }
+
+
+# ============================================================================
+# README.md
+# ============================================================================
 
 def generate_readme(model: str, bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
-    """Generate README.md using LLM."""
     info("=== Generating README.md ===")
-    
+
     readme_variants = ['readme', 'readme.md', 'readme.txt', 'readme.rst']
-    existing_readme = None
-    
     for item in out_dir.iterdir():
         if item.is_file() and item.name.lower() in readme_variants:
-            existing_readme = item
-            break
-    
-    if existing_readme:
-        info(f"✓ Found existing: {existing_readme.name}")
-        return {"warnings": [], "questions": []}
-    
+            info(f"✓ Found existing: {item.name}")
+            return {"warnings": [], "questions": []}
+
     payload = json.dumps({
-        "documents": bundle.get("documents", []),
+        "documents":  bundle.get("documents", []),
         "user_hints": bundle.get("user_hints", {}),
         "existing_readme": None
     }, ensure_ascii=False)
-    
+
     try:
         response_text = llm_trio_readme(model, payload)
-        
         if _is_markdown_content(response_text):
             info("✓ LLM returned direct Markdown content")
             result = {"readme_content": response_text.strip()}
         else:
             result = _parse_llm_json_response(response_text, "README", show_preview=True)
             if result is None:
-                info(f"Could not parse LLM response, using default README")
                 result = {"readme_content": "# Dataset\n\nNeuroimaging dataset.\n"}
-            else:
-                if DEBUG_MODE:
-                    debug(f"Successfully parsed README JSON response")
     except Exception as e:
         warn(f"README generation failed: {e}")
         result = {"readme_content": "# Dataset\n\nNeuroimaging dataset.\n"}
-    
+
     readme_content = result.get("readme_content", "# Dataset\n\nNeuroimaging dataset.\n")
     write_text(out_dir / TRIO_README, readme_content)
     info(f"✓ Created: {TRIO_README}")
-    
-    if "extraction_log" in result:
-        info("README extraction sources:")
-        for field, source in result["extraction_log"].items():
-            info(f"  {field}: {source}")
-    
     return {"warnings": [], "questions": []}
 
-def generate_participants(model: str, bundle: Dict[str, Any], out_dir: Path, force_simple: bool = False) -> Dict[str, Any]:
-    """
-    Generate participants.tsv - SIMPLIFIED VERSION.
-    
-    Args:
-        force_simple: If True, generate simple sequential IDs even for large datasets
-    
-    New strategy:
-    - Only generate if data is simple and small (≤ 100 subjects)
-    - For complex or large datasets, defer to Plan stage
-    - Plan stage has better subject detection logic
-    """
+
+# ============================================================================
+# participants.tsv
+# ============================================================================
+
+def generate_participants(model: str, bundle: Dict[str, Any], out_dir: Path,
+                          force_simple: bool = False) -> Dict[str, Any]:
     info("=== Generating participants.tsv ===")
-    
+
     parts_path = out_dir / TRIO_PARTICIPANTS
-    
     if parts_path.exists():
         info(f"✓ Found existing: {parts_path}")
         return {"warnings": [], "questions": []}
-    
+
     n_subjects = bundle.get("user_hints", {}).get("n_subjects", 1)
-    
-    # DECISION: Defer to Plan stage for complex cases (unless forced)
+    all_files  = bundle.get("all_files", [])
+
     if not force_simple:
-        if n_subjects > 100:
-            info(f"Large dataset ({n_subjects} subjects) - deferring to Plan stage")
-            info("  Plan stage will generate participants.tsv with proper subject detection")
+        if n_subjects > 100 or len(all_files) > 500:
+            info(f"Complex dataset — deferring participants.tsv to Plan stage")
             return {"warnings": [], "questions": [], "deferred": True}
-        
-        # Check if file structure is complex
-        all_files = bundle.get("all_files", [])
-        if len(all_files) > 500:
-            info(f"Complex file structure ({len(all_files)} files) - deferring to Plan stage")
-            return {"warnings": [], "questions": [], "deferred": True}
-    
-    # Simple case or forced: generate basic participants.tsv
-    if force_simple:
-        info(f"Generating basic participants.tsv (forced mode)")
-    else:
-        info(f"Simple dataset ({n_subjects} subjects) - generating basic participants.tsv")
-    
-    lines = ["participant_id\n"]
-    for i in range(1, n_subjects + 1):
-        lines.append(f"sub-{i:02d}\n")
-    parts_content = "".join(lines)
-    
-    write_text(parts_path, parts_content)
-    info(f"✓ Created: {parts_path} (basic format)")
-    
-    if not force_simple:
-        info(f"  Note: Plan stage may update this file with additional columns")
-    else:
-        warn(f"  WARNING: Using sequential IDs (sub-01 to sub-{n_subjects:02d})")
-        warn(f"  This may not match actual file structure. Consider running 'plan' instead.")
-    
+
+    info(f"Generating basic participants.tsv ({n_subjects} subjects)")
+    lines = ["participant_id\n"] + [f"sub-{i:02d}\n" for i in range(1, n_subjects + 1)]
+    write_text(parts_path, "".join(lines))
+    info(f"✓ Created: {parts_path}")
+    info(f"  Note: Plan stage may update this file with additional columns")
     return {"warnings": [], "questions": []}
+
+
+# ============================================================================
+# Generate all trio files
+# ============================================================================
 
 def trio_generate_all(model: str, bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     info("=== Generating BIDS Trio (all files) ===")
-    
+
     status = check_trio_status(out_dir)
-    
-    info("Trio file status:")
     info(f"  dataset_description.json: {'EXISTS' if status['dataset_description']['exists'] else 'MISSING'}")
-    info(f"  README.md: {'EXISTS' if status['readme']['exists'] else 'MISSING'}")
-    info(f"  participants.tsv: {'EXISTS' if status['participants']['exists'] else 'MISSING'}")
+    info(f"  README.md:                {'EXISTS' if status['readme']['exists'] else 'MISSING'}")
+    info(f"  participants.tsv:         {'EXISTS' if status['participants']['exists'] else 'MISSING'}")
     info("")
-    
-    all_warnings = []
-    all_questions = []
-    
-    dd_result = generate_dataset_description(model, bundle, out_dir)
-    all_warnings.extend(dd_result.get("warnings", []))
-    all_questions.extend(dd_result.get("questions", []))
-    
-    readme_result = generate_readme(model, bundle, out_dir)
-    all_warnings.extend(readme_result.get("warnings", []))
-    all_questions.extend(readme_result.get("questions", []))
-    
-    parts_result = generate_participants(model, bundle, out_dir)
-    all_warnings.extend(parts_result.get("warnings", []))
-    all_questions.extend(parts_result.get("questions", []))
-    
-    # Track if participants.tsv was deferred
-    parts_deferred = parts_result.get("deferred", False)
-    
-    # IMPORTANT: Summary of what was actually generated
+
+    all_warnings: List[str] = []
+    all_questions: List[str] = []
+
+    for fn, label in [
+        (generate_dataset_description, "dataset_description.json"),
+        (generate_readme,              "README.md"),
+        (generate_participants,        "participants.tsv"),
+    ]:
+        r = fn(model, bundle, out_dir)
+        all_warnings.extend(r.get("warnings", []))
+        all_questions.extend(r.get("questions", []))
+
+    dd_exists    = (out_dir / TRIO_DATASET_DESC).exists()
+    readme_exists = (out_dir / TRIO_README).exists()
+    parts_exists  = (out_dir / TRIO_PARTICIPANTS).exists()
+    generated     = sum([dd_exists, readme_exists, parts_exists])
+
     info("")
     info("=== Trio Generation Summary ===")
-    
-    # Check what exists now
-    dd_exists = (out_dir / TRIO_DATASET_DESC).exists()
-    readme_exists = (out_dir / TRIO_README).exists()
-    parts_exists = (out_dir / TRIO_PARTICIPANTS).exists()
-    
-    generated_count = sum([dd_exists, readme_exists, parts_exists])
-    deferred_count = 1 if parts_deferred else 0
-    
-    if dd_exists:
-        info("✓ dataset_description.json - Generated")
-    else:
-        warn("✗ dataset_description.json - NOT generated")
-    
-    if readme_exists:
-        info("✓ README.md - Generated")
-    else:
-        warn("✗ README.md - NOT generated")
-    
-    if parts_exists:
-        info("✓ participants.tsv - Generated")
-    elif parts_deferred:
-        info("○ participants.tsv - Deferred to Plan stage")
-        info("  → Reason: Complex dataset requires file structure analysis")
-        info("  → Next step: Run 'plan' command to complete trio generation")
-    else:
-        warn("✗ participants.tsv - NOT generated")
-    
-    info("")
-    info(f"Status: {generated_count}/3 generated, {deferred_count}/3 deferred")
-    
-    if parts_deferred:
-        info("")
-        info("To complete BIDS trio generation, run:")
-        info(f"  python cli.py plan --output {out_dir} --model {model}")
-    
+    info(f"{'✓' if dd_exists else '✗'} dataset_description.json")
+    info(f"{'✓' if readme_exists else '✗'} README.md")
+    info(f"{'✓' if parts_exists else '○'} participants.tsv {'(deferred to Plan)' if not parts_exists else ''}")
+    info(f"Status: {generated}/3 generated")
+
     return {"warnings": all_warnings, "questions": all_questions}
