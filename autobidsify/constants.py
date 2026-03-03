@@ -1,5 +1,7 @@
 # constants.py
-# Global constants and configurations
+# Global constants and configurations - v10
+# CRITICAL: Strict MRI/fNIRS separation, .mat only for fNIRS
+# NEW: Added Qwen model support
 
 # ==================== TRIO FILE NAMES ====================
 TRIO_DATASET_DESC = "dataset_description.json"
@@ -59,12 +61,12 @@ SEVERITY_WARN = "warn"
 SEVERITY_BLOCK = "block"
 
 # ==================== FILE EXTENSIONS ====================
-# MODIFIED: Added JNIfTI extensions (.jnii, .bnii)
-MRI_EXTENSIONS = ['.nii', '.nii.gz', '.dcm', '.mat', '.jnii', '.bnii']
-NIRS_EXTENSIONS = ['.snirf', '.nirs', '.csv', '.mat']
+# CRITICAL: Strict separation - .mat ONLY for fNIRS
+MRI_EXTENSIONS = ['.nii', '.nii.gz', '.dcm', '.jnii', '.bnii']  # MRI only
+NIRS_EXTENSIONS = ['.snirf', '.nirs', '.mat']  # fNIRS only (includes .mat)
 DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.txt', '.md', '.rst']
 
-# NEW: JNIfTI specific extensions
+# JNIfTI specific extensions (MRI subset)
 JNIFTI_EXTENSIONS = ['.jnii', '.bnii']
 
 # ==================== MODALITY TYPES ====================
@@ -96,7 +98,24 @@ BIDS_PLAN = "BIDSPlan.yaml"
 DEFAULT_MODEL = "gpt-4o"
 DEFAULT_NSUBJECTS = 1
 
+# NEW: Model prefixes for different providers
 REASONING_MODELS_PREFIXES = ["o1", "o3", "gpt-5"]
+QWEN_MODEL_PREFIXES = ["qwen"]
+
+# NEW: Recommended Qwen models
+QWEN_RECOMMENDED_MODELS = {
+    "general": [
+        "qwen2.5:7b",      # Balanced performance
+        "qwen2.5:14b",     # Better performance
+        "qwen2.5:32b",     # Strong performance
+        "qwen3:8b",        # Latest generation
+    ],
+    "coding": [
+        "qwen2.5-coder:7b",   # Recommended for code tasks
+        "qwen2.5-coder:14b",  # Better code understanding
+        "qwen2.5-coder:32b",  # Near GPT-4o performance
+    ]
+}
 
 TASK_TEMPERATURES = {
     "classification": 0.15,
