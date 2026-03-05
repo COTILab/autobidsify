@@ -538,7 +538,8 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                 subject_id = group_data['subject_id']
                 bids_filename = group_data['bids_filename']
                 subdirectory = group_data['subdirectory']
-                file_ext = filepath.suffix.lower()
+                # file_ext = filepath.suffix.lower()
+                file_ext = filepath.name.lower().endswith('.nii.gz') and '.nii.gz' or filepath.suffix.lower()
                 
                 dst = bids_root / f"sub-{subject_id}" / subdirectory / bids_filename
                 ensure_dir(dst.parent)
