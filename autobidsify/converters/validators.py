@@ -63,23 +63,19 @@ def run_bids_validator(bids_root: Path) -> Dict[str, Any]:
             
             if errors:
                 warn(f"Found {len(errors)} BIDS errors:")
-                for i, err in enumerate(errors[:5], 1):
+                for i, err in enumerate(errors, 1):
                     warn(f"  {i}. {err.get('code', 'ERROR')}: {err.get('reason', 'Unknown')}")
-                if len(errors) > 5:
-                    warn(f"  ... and {len(errors) - 5} more errors")
             else:
                 info("  ✓ No BIDS errors found")
-            
+
             if warnings_list:
                 info(f"  ⚠ {len(warnings_list)} warnings")
-                for i, w in enumerate(warnings_list[:3], 1):
+                for i, w in enumerate(warnings_list, 1):
                     info(f"    {i}. {w.get('code', 'WARN')}: {w.get('reason', 'Unknown')}")
-                if len(warnings_list) > 3:
-                    info(f"    ... and {len(warnings_list) - 3} more warnings")
             else:
                 info("  ✓ No warnings")
-            
-            return report
+                        
+                        return report
             
         except json.JSONDecodeError as e:
             warn(f"Could not parse validator output: {e}")
