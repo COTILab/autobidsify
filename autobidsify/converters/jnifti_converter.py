@@ -28,7 +28,7 @@ from typing import Dict, Any, Optional, Union, List
 import json
 import numpy as np
 import nibabel as nib
-from utils import ensure_dir, warn, info
+from autobidsify.utils import ensure_dir, warn, info
 
 # ============================================================================
 # NIfTI Code Maps (from niicodemap.m)

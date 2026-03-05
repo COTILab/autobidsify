@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Command-line interface for BIDS Pipeline v10
+Command-line interface for BIDS Pipeline
 NEW: Support for both OpenAI and Qwen (Ollama) models
 """
 
@@ -12,20 +12,20 @@ project_root = Path(__file__).parent.resolve()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from stages.ingest import ingest_data
-from stages.evidence import build_evidence_bundle
-from stages.classification import classify_files
-from stages.trio import (
+from autobidsify.stages.ingest import ingest_data
+from autobidsify.stages.evidence import build_evidence_bundle
+from autobidsify.stages.classification import classify_files
+from autobidsify.stages.trio import (
     trio_generate_all,
     generate_dataset_description,
     generate_readme,
     generate_participants
 )
-from converters.planner import build_bids_plan
-from converters.executor import execute_bids_plan
-from converters.validators import validate_bids_compatible
-from utils import info, warn, fatal, read_json, read_yaml
-from constants import QWEN_RECOMMENDED_MODELS
+from autobidsify.converters.planner import build_bids_plan
+from autobidsify.converters.executor import execute_bids_plan
+from autobidsify.converters.validators import validate_bids_compatible
+from autobidsify.utils import info, warn, fatal, read_json, read_yaml
+from autobidsify.constants import QWEN_RECOMMENDED_MODELS
 
 
 def is_qwen_model(model: str) -> bool:

@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 import nibabel as nib
 from scipy.io import loadmat
-from utils import ensure_dir, warn, info, write_json
+from autobidsify.utils import ensure_dir, warn, info, write_json
 
 def check_dcm2niix_available() -> bool:
     """Check if dcm2niix is installed and available."""

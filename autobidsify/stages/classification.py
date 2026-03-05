@@ -33,9 +33,9 @@ Output Files:
 from pathlib import Path
 from typing import Dict, Any, List
 import json
-from utils import ensure_dir, write_json, copy_file, info, warn, fatal, read_json
-from constants import CLASSIFICATION_PLAN, NIRS_POOL, MRI_POOL, UNKNOWN_POOL
-from llm import llm_classify
+from autobidsify.utils import ensure_dir, write_json, copy_file, info, warn, fatal, read_json
+from autobidsify.constants import CLASSIFICATION_PLAN, NIRS_POOL, MRI_POOL, UNKNOWN_POOL
+from autobidsify.llm import llm_classify
 
 def classify_and_stage(model: str, bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     """

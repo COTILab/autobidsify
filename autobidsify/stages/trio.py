@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import json
 import re
-from utils import write_json, write_text, read_json, warn, info, fatal, debug
-from constants import (
+from autobidsify.utils import write_json, write_text, read_json, warn, info, fatal, debug
+from autobidsify.constants import (
     TRIO_README, TRIO_PARTICIPANTS, TRIO_DATASET_DESC,
     LICENSE_WHITELIST, SEVERITY_WARN, SEVERITY_INFO
 )
-from llm import llm_trio_dataset_description, llm_trio_readme, llm_trio_participants
+from autobidsify.llm import llm_trio_dataset_description, llm_trio_readme, llm_trio_participants
 
 DEBUG_MODE = True
 

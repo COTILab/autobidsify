@@ -1,21 +1,16 @@
 # validators.py
-# BIDS validation
+# Apply BIDS-validator
 
 """
 This module validates the generated dataset to ensure it conforms to the BIDS specification.
 
 Core Functions:
-
 1. BIDS Structure Validation (using the official bids-validator or built-in checks)
-
 2. Required File Checks (dataset_description.json, README, participants.tsv)
-
 3. Required Field Validation (Name, License)
 
 Note:
-
 - NIRS data in BIDS must be in SNIRF format, so separate SNIRF validation is not required.
-
 - If BIDS compliant, the SNIRF file already conforms to the specification.
 """
 
@@ -24,7 +19,7 @@ from typing import Dict, Any
 import json
 import shutil
 import subprocess
-from utils import warn, info
+from autobidsify.utils import warn, info
 
 def run_bids_validator(bids_root: Path) -> Dict[str, Any]:
     """
@@ -74,8 +69,8 @@ def run_bids_validator(bids_root: Path) -> Dict[str, Any]:
                     info(f"    {i}. {w.get('code', 'WARN')}: {w.get('reason', 'Unknown')}")
             else:
                 info("  ✓ No warnings")
-                        
-                        return report
+            
+            return report
             
         except json.JSONDecodeError as e:
             warn(f"Could not parse validator output: {e}")

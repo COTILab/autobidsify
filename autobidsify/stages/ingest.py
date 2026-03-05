@@ -4,7 +4,6 @@
 
 """
 Data Ingestion Module Workflow:
-
 1. Detect Input Type
 2. Compress File → Decompress to Staging
 3. Directory → Create only ingest_info.json, recording the original path
@@ -14,8 +13,8 @@ Data Ingestion Module Workflow:
 import zipfile
 import tarfile
 from pathlib import Path
-from utils import ensure_dir, info, fatal, warn, write_json
 from datetime import datetime
+from autobidsify.utils import ensure_dir, info, fatal, warn, write_json
 
 def ingest_data(input_path: str, output_dir: Path) -> None:
     """

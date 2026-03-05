@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import shutil
 import re
-from utils import ensure_dir, write_json, write_yaml, copy_file, list_all_files, info, warn, read_json
-from converters.mri_convert import run_dcm2niix_batch, check_dcm2niix_available
-from converters.jnifti_converter import convert_jnifti_to_nifti, check_jnifti_support
-from converters.nirs_convert import (
+from autobidsify.utils import ensure_dir, write_json, write_yaml, copy_file, list_all_files, info, warn, read_json
+from autobidsify.converters.mri_convert import run_dcm2niix_batch, check_dcm2niix_available
+from autobidsify.converters.jnifti_converter import convert_jnifti_to_nifti, check_jnifti_support
+from autobidsify.converters.nirs_convert import (
     write_snirf_from_normalized, 
     write_nirs_sidecars,
     convert_mat_to_snirf,

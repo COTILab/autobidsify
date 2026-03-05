@@ -1,14 +1,14 @@
 # evidence.py
 
+import csv
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
 from collections import defaultdict
-from utils import list_all_files, write_json, sha1_head, warn, info, fatal, copy_file, read_json
-from constants import MAX_TEXT_SIZE, MAX_PDF_SIZE, MAX_DOCX_SIZE, MAX_PDF_PAGES
-from universal_core import FileStructureAnalyzer
-from filename_tokenizer import analyze_filenames_for_subjects
-import csv
-import re
+from autobidsify.utils import list_all_files, write_json, sha1_head, warn, info, fatal, copy_file, read_json
+from autobidsify.constants import MAX_TEXT_SIZE, MAX_PDF_SIZE, MAX_DOCX_SIZE, MAX_PDF_PAGES
+from autobidsify.universal_core import FileStructureAnalyzer
+from autobidsify.filename_tokenizer import analyze_filenames_for_subjects
 
 TEXT_EXT    = {".txt", ".md", ".rst", ".html", ".htm", ".log"}
 TABLE_EXT   = {".csv", ".tsv", ".xlsx", ".xls"}

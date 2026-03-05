@@ -1,7 +1,7 @@
 import os
 import json
 from typing import Any, Optional
-from utils import warn, fatal, info
+from autobidsify.utils import warn, fatal, info
 
 # ============================================================================
 # Exception Classes
@@ -355,9 +355,15 @@ CRITICAL RULES
    - If the document says "released under Creative Commons" → raw_license: "Creative Commons"
    - If no license mentioned anywhere → omit raw_license
 
-2. AUTHORS — extract ONLY from user_hints.user_text:
-   - Look for citation/reference patterns: "Author, A., Author, B. (year)..."
-   - Do NOT extract authors from documents[] (those are reference papers, not dataset owners)
+2. AUTHORS — extract from ALL available sources:
+   - Search in order: user_hints.user_text → documents[]
+   - Look for: explicit author lists, citation patterns ("Author, A., Author, B. (year)..."),
+     "Created by", "Principal Investigator", "Contact", "Contributors" sections
+   - ONLY include authors with full or partial real names explicitly written out
+   - "et al." does NOT count — if only "et al." is present, omit Authors entirely
+   - Do NOT infer, guess, or use outside knowledge to expand author lists
+   - Do NOT fabricate names not present in any input source
+   - If no authors found anywhere, omit the Authors field entirely
    - Output as array: ["First Last", "First Last"]
 
 3. NAME — infer from context:

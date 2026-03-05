@@ -23,7 +23,7 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import h5py
 import csv
-from utils import ensure_dir, warn, info, write_json
+from autobidsify.utils import ensure_dir, warn, info, write_json
 
 
 # ============================================================================

@@ -8,9 +8,9 @@ import yaml
 import re
 from datetime import datetime
 from collections import defaultdict
-from utils import write_json, read_json, write_yaml, info, warn, fatal, write_text
-from constants import SEVERITY_BLOCK
-from llm import llm_nirs_draft, llm_nirs_normalize, llm_mri_voxel_draft, llm_mri_voxel_final, llm_bids_plan
+from autobidsify.utils import write_json, read_json, write_yaml, info, warn, fatal, write_text
+from autobidsify.constants import SEVERITY_BLOCK
+from autobidsify.llm import llm_nirs_draft, llm_nirs_normalize, llm_mri_voxel_draft, llm_mri_voxel_final, llm_bids_plan
 
 HEADERS_DRAFT = "nirs_headers_draft.json"
 HEADERS_NORMALIZED = "nirs_headers_normalized.json"
