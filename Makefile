@@ -36,7 +36,7 @@ coverage:
 	@echo "Coverage report generated in htmlcov/index.html"
 
 lint:
-	$(PYTHON) -m flake8 rautobidsify/ test/
+	$(PYTHON) -m flake8 autobidsify/ test/
 	@echo "Linting complete"
 
 clean:
@@ -73,7 +73,7 @@ check: build
 
 # Install from TestPyPI (for testing)
 install-testpypi:
-	$(PIP) install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ rautobidsify
+	$(PIP) install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ autobidsify
 
 # Generate documentation (requires sphinx)
 docs:
@@ -81,7 +81,7 @@ docs:
 
 # Format code (requires black)
 format:
-	$(PYTHON) -m black rautobidsify/ test/ example/*.py setup.py
+	$(PYTHON) -m black autobidsify/ test/ example/*.py setup.py
 
 # Run all demo scripts
 demo:
@@ -89,7 +89,7 @@ demo:
 
 # Type checking (requires mypy)
 typecheck:
-	$(PYTHON) -m mypy rautobidsify/
+	$(PYTHON) -m mypy autobidsify/
 
 # Run all checks before commit
 precommit: lint test
@@ -97,9 +97,9 @@ precommit: lint test
 
 # Show package info
 info:
-	@$(PYTHON) -c "import rautobidsify; rautobidsify.info()"
+	@$(PYTHON) -c "import autobidsify; autobidsify.info()"
 
 # Show version
 version:
-	@$(PYTHON) -c "import rautobidsify; print(rautobidsify.__version__)"
+	@$(PYTHON) -c "import autobidsify; print(autobidsify.__version__)"
 

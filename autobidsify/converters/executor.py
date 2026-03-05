@@ -598,12 +598,14 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                     copy_file(filepath, dst)
                     successes += 1
                     conversion_performed = True
-                
+
                 # MRI: Already NIfTI (format_ready=true)
-                elif file_ext in ['.nii', '.nii.gz'] and modality == 'mri':
+                elif file_ext in ('.nii', '.nii.gz') and modality == 'mri':
                     copy_file(filepath, dst)
                     successes += 1
                     conversion_performed = True
+                    # Generate sidecar JSON if functional scan
+                    _write_nifti_sidecar_if_needed(filepath, dst, scan_info)
                 
                 # Unknown format
                 else:
