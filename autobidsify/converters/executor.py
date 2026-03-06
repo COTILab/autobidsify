@@ -379,23 +379,25 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
     - fNIRS: .mat→SNIRF, .nirs→SNIRF
     """
     info("=== Executing BIDS Plan v10 ===")
-    
+
     bids_root = Path(output_dir) / "bids_compatible"
     ensure_dir(bids_root)
     ensure_dir(bids_root / "derivatives")
+
+    processed_sources = set()  # Track all successfully processed source files
     
     logs = []
     successes = 0
     failures = 0
     
-    info("\n[1/4] Organizing trio files...")
+    info("\n[1/5] Organizing trio files...")
     for trio_file in ["dataset_description.json", "README.md", "participants.tsv"]:
         src = output_dir / trio_file
         if src.exists():
             shutil.copy2(src, bids_root / trio_file)
             info(f"  ✓ {trio_file}")
     
-    info("\n[2/4] Processing data files...")
+    info("\n[2/5] Processing data files...")
     
     all_files_paths = list_all_files(input_root)
     all_files_str = [str(p.relative_to(input_root)).replace("\\", "/") for p in all_files_paths]
@@ -444,7 +446,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
         info(f"    ✓ Matched: {len(matched_files)} files")
         
         # ==================================================================
-        # NEW v10: Handle fNIRS conversion (BEFORE file analysis)
+        # Handle fNIRS conversion (BEFORE file analysis)
         # ==================================================================
         if modality == "nirs" and not format_ready:
             info(f"    → fNIRS conversion required ({convert_to})")
@@ -518,6 +520,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                             if result:
                                 converted_count += 1
                                 successes += 1
+                                processed_sources.add(filepath_str)
                             else:
                                 failures += 1
                         
@@ -526,6 +529,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                             if result:
                                 converted_count += 1
                                 successes += 1
+                                processed_sources.add(filepath_str)
                             else:
                                 failures += 1
                         
@@ -627,6 +631,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                         if result:
                             successes += 1
                             conversion_performed = True
+                            processed_sources.add(filepath_str)
                         else:
                             warn(f"      ✗ JNIfTI conversion failed")
                             failures += 1
@@ -651,6 +656,8 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                                 info(f"      ✓ Converted {len(all_dicoms)} DICOM files")
                                 successes += 1
                                 conversion_performed = True
+                                for dcm_str in group_data['files']:
+                                    processed_sources.add(dcm_str)
                             else:
                                 warn(f"      ✗ DICOM conversion failed")
                                 failures += 1
@@ -667,12 +674,14 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                     copy_file(filepath, dst)
                     successes += 1
                     conversion_performed = True
+                    processed_sources.add(filepath_str)
 
                 # MRI: Already NIfTI (format_ready=true)
                 elif file_ext in ('.nii', '.nii.gz') and modality == 'mri':
                     copy_file(filepath, dst)
                     successes += 1
                     conversion_performed = True
+                    processed_sources.add(filepath_str)
                     # Generate sidecar JSON if functional scan
                     _write_nifti_sidecar_if_needed(filepath, dst, scan_info)
                 
@@ -695,7 +704,32 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                 warn(f"      ✗ Failed: {e}")
                 failures += 1
     
-    info("\n[3/4] Finalizing...")
+    # ================================================================
+    # Copy unprocessed files to derivatives/ (original structure)
+    # ================================================================
+    info("\n[3/5] Copying unprocessed files to derivatives/...")
+
+    derivatives_root = bids_root / "derivatives"
+    unprocessed = [f for f in all_files_str if f not in processed_sources]
+
+    info(f"  Total files: {len(all_files_str)}, "
+        f"processed: {len(processed_sources)}, "
+        f"unprocessed: {len(unprocessed)}")
+
+    derivatives_count = 0
+    for filepath_str in unprocessed:
+        src = path_str_to_path.get(filepath_str)
+        if src and src.exists():
+            dst = derivatives_root / filepath_str
+            try:
+                copy_file(src, dst)
+                derivatives_count += 1
+            except Exception as e:
+                warn(f"  Could not copy to derivatives: {filepath_str}: {e}")
+
+    info(f"  ✓ Copied {derivatives_count} files to derivatives/")
+
+    info("\n[4/5] Finalizing...")
     
     # Save conversion log
     write_json(Path(output_dir) / "_staging" / "conversion_log.json", logs)
@@ -713,7 +747,7 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
     # Count subjects and files
     subject_dirs = list(bids_root.glob("sub-*"))
     
-    info(f"\n[4/4] Summary")
+    info(f"\n[5/5] Summary")
     info(f"━" * 60)
     info(f"✓ BIDS Dataset Created")
     info(f"Location: {bids_root}")
