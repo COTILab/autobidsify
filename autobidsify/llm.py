@@ -135,7 +135,8 @@ def _call_qwen_ollama(model: str, system_prompt: str, user_payload: str,
             {'role': 'user', 'content': user_payload}
         ]
         
-        options = {}
+        # options = {}
+        options = {'top_p': 0.8}
         if temperature is not None:
             options['temperature'] = temperature
         
@@ -247,7 +248,8 @@ def _call_qwen_api(model: str, system_prompt: str, user_payload: str,
             model=dashscope_model,
             messages=messages,
             result_format='message',
-            temperature=temperature if temperature is not None else 0.85
+            temperature=temperature if temperature is not None else 0.85,
+            top_p=0.8
         )
         
         if response.status_code == 200:
@@ -300,6 +302,36 @@ def _call_qwen(model: str, system_prompt: str, user_payload: str,
 # Unified LLM Call
 # ============================================================================
 
+def _infer_qwen_temperature(model: str, base_temperature: Optional[float]) -> Optional[float]:
+    """
+    Infer appropriate temperature for Qwen model based on model name semantics.
+    
+    Rules (keyword-based, not hardcoded model names):
+    - think/careful/compare → reasoning-style model, prone to hallucination → lower to 0.15
+    - next/fast/turbo       → speed-optimized model, prone to skipping fields → raise to 0.4
+    - coder                 → instruction-following model → keep at 0.3
+    - default               → raise low temps to 0.3 minimum
+    """
+    if base_temperature is None:
+        return None
+    
+    model_lower = model.lower()
+    
+    # Reasoning/careful models: hallucination risk → lower temperature
+    if any(kw in model_lower for kw in ['think', 'careful', 'compare', 'reason']):
+        return min(base_temperature, 0.15)
+    
+    # Speed/next models: field-skipping risk → raise temperature
+    if any(kw in model_lower for kw in ['next', 'fast', 'turbo', 'lite']):
+        return max(base_temperature, 0.4)
+    
+    # All other Qwen: raise low temps to 0.3 minimum
+    if base_temperature < 0.2:
+        return 0.3
+    
+    return base_temperature
+
+
 def _call_llm(model: str, system_prompt: str, user_payload: str, 
              step: str, temperature: Optional[float] = None) -> str:
     """
@@ -308,15 +340,17 @@ def _call_llm(model: str, system_prompt: str, user_payload: str,
     Auto-detects provider based on model name:
     - gpt*, o1*, o3* → OpenAI
     - qwen* → Qwen (Ollama or DashScope API)
+    
+    For Qwen: automatically adjusts temperature based on model name semantics.
     """
     if is_qwen_model(model):
-        return _call_qwen(model, system_prompt, user_payload, step, temperature)
+        qwen_temp = _infer_qwen_temperature(model, temperature)
+        return _call_qwen(model, system_prompt, user_payload, step, qwen_temp)
     elif is_openai_model(model):
         return _call_openai(model, system_prompt, user_payload, step, temperature)
     else:
         raise LLMHardFail(step, "UnknownProvider", 
                          f"Unknown model: {model}. Use 'gpt*', 'o1*', 'o3*', or 'qwen*'")
-
 
 # ============================================================================
 # PROMPTS
@@ -357,14 +391,27 @@ CRITICAL RULES
 
 2. AUTHORS — extract from ALL available sources:
    - Search in order: user_hints.user_text → documents[]
-   - Look for: explicit author lists, citation patterns ("Author, A., Author, B. (year)..."),
-     "Created by", "Principal Investigator", "Contact", "Contributors" sections
-   - ONLY include authors with full or partial real names explicitly written out
-   - "et al." does NOT count — if only "et al." is present, omit Authors entirely
+   - Look for: explicit author lists, citation patterns, "Created by",
+     "Principal Investigator", "Contact", "Contributors" sections
+   - If full names are available, use them: ["Last FM", "Last FM"]
+   - If only "et al." citation exists, keep first author + et al.: ["Shafto MA et al."]
    - Do NOT infer, guess, or use outside knowledge to expand author lists
    - Do NOT fabricate names not present in any input source
-   - If no authors found anywhere, omit the Authors field entirely
-   - Output as array: ["First Last", "First Last"]
+   - If no author information found anywhere, omit Authors field entirely
+
+   EXAMPLES (follow exactly):
+   
+   Input: "Smith et al. (2023). A neuroimaging study..."
+   Output: "Authors": ["Smith et al."]
+   
+   Input: "Created by John Doe, Jane Smith and Bob Lee"
+   Output: "Authors": ["John Doe", "Jane Smith", "Bob Lee"]
+   
+   Input: "Data collected by the CamCAN team. Contact: info@cam.ac.uk"
+   Output: (omit Authors field)
+   
+   Input: "Shafto et al. (2014). The Cambridge Centre for Ageing..."
+   Output: "Authors": ["Shafto et al."]
 
 3. NAME — infer from context:
    - Look for explicit dataset name in user_hints.user_text
@@ -401,6 +448,18 @@ Notes:
 - BIDSVersion must always be "1.10.0"
 - DatasetType must always be "raw"
 - Output ONLY valid JSON, no extra text, no markdown fences
+
+FIELD SOURCE RULES (STRICT - violations cause data integrity failure):
+┌─────────────────┬────────────────────────────────────────────────────┐
+│ Field           │ Allowed sources                                    │
+├─────────────────┼────────────────────────────────────────────────────┤
+│ Authors         │ user_hints.user_text or documents[] ONLY           │
+│                 │ NEVER use training knowledge to expand et al.      │
+│ raw_license     │ user_hints.user_text or documents[] ONLY           │
+│ Name            │ may infer from context if not explicit             │
+│ BIDSVersion     │ always "1.10.0" (fixed)                            │
+│ DatasetType     │ always "raw" (fixed)                               │
+└─────────────────┴────────────────────────────────────────────────────┘
 """
 
 PROMPT_TRIO_README = """Generate README.md for BIDS dataset.
@@ -517,13 +576,16 @@ EXAMPLE for .mat in fNIRS dataset:
     modality_hint: "nirs"
   
   → Decision: .mat files are fNIRS data
-  
+
   mappings:
-    - modality: nirs
-      match: ['*.mat', '**/*.mat']
-      format_ready: false     # ← MUST be false (needs conversion)
-      convert_to: snirf       # ← Specify SNIRF as target
-      filename_rules:
+  - modality: mri         # OR nirs
+    match: ['*.nii.gz', '**/*.dcm']  # Match patterns
+    exclude: []           # Optional: glob patterns to exclude (e.g. ['**/BRIK/**'])
+                          # Analyze sample_files to detect duplicate/redundant directories
+                          # Common patterns: BRIK, backup, old, duplicate, raw_orig
+    format_ready: true    # true ONLY for .nii/.nii.gz (MRI) or .snirf (fNIRS)
+    convert_to: none      # OR 'nifti' (DICOM/JNIfTI) OR 'snirf' (.mat/.nirs)
+    filename_rules:
         - match_pattern: '.*'
           bids_template: 'sub-X_task-rest_nirs.snirf'
 
@@ -679,17 +741,33 @@ mappings:
 
 COMPLETE EXAMPLES:
 
-Example 1: MRI dataset with DICOM files
+Example 1: MRI dataset with NIfTI files in BRIK/NIfTI duplicate directories
+  mappings:
+    - modality: mri
+      match: ['**/*.nii.gz']
+      exclude: ['**/BRIK/**']   ← exclude duplicate BRIK directory
+      format_ready: true
+      convert_to: none
+      filename_rules:
+        - match_pattern: '.*anonymized.*'
+          bids_template: 'sub-X_T1w.nii.gz'
+        - match_pattern: '.*skullstripped.*'
+          bids_template: 'sub-X_desc-skullstripped_T1w.nii.gz'
+        - match_pattern: '.*rest.*'
+          bids_template: 'sub-X_task-rest_bold.nii.gz'
+
+Example 2: MRI dataset with DICOM files
   mappings:
     - modality: mri
       match: ['*.dcm', '**/*.dcm']
+      exclude: []
       format_ready: false
       convert_to: nifti
       filename_rules:
         - match_pattern: '.*'
           bids_template: 'sub-X_T1w.nii.gz'
 
-Example 2: fNIRS dataset with .mat files
+Example 3: fNIRS dataset with .mat files
   mappings:
     - modality: nirs
       match: ['*.mat', '**/*.mat']
@@ -699,7 +777,7 @@ Example 2: fNIRS dataset with .mat files
         - match_pattern: '.*'
           bids_template: 'sub-X_task-rest_nirs.snirf'
 
-Example 3: Mixed dataset
+Example 4: Mixed dataset
   mappings:
     - modality: mri
       match: ['*.nii.gz']

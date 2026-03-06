@@ -306,55 +306,81 @@ def _extract_subjects_from_flat_filenames(all_files: List[str],
     }
 
 
-def _update_participants_with_metadata(plan: Dict[str, Any], out_dir: Path) -> None:
-    """Update participants.tsv with metadata from LLM plan.
+def _merge_participants_with_metadata(plan: Dict[str, Any],
+                                       out_dir: Path,
+                                       subject_info: Dict[str, Any],
+                                       id_mapping_info: Dict[str, Any]) -> None:
+    """
+    Merge LLM participant_metadata into Python-generated participants.tsv.
     
-    Skips original_id column when its value is identical to participant_id
-    (i.e. already_bids strategy where sub-01 → sub-01 adds no information).
+    Design:
+    - Python subject list is the authoritative source (always complete)
+    - LLM metadata provides ADDITIONAL columns only (age, sex, group, etc.)
+    - Missing values filled with 'n/a'
+    - Never reduces row count below Python's subject count
     """
     participants_path = out_dir / 'participants.tsv'
     participant_metadata = plan.get('participant_metadata', {})
+    subject_records = subject_info.get('subject_records', [])
+    id_mapping = id_mapping_info.get('id_mapping', {})
+    metadata_columns = id_mapping_info.get('metadata_columns', [])
 
     if not participant_metadata:
         return
 
-    # Collect all additional columns from metadata
-    first_subject = list(participant_metadata.values())[0]
-    additional_columns = list(first_subject.keys())
+    # Collect extra columns from LLM metadata
+    # (exclude columns Python already handles: original_id, site)
+    python_columns = set(metadata_columns) | {'original_id', 'site'}
+    extra_columns = []
+    for meta in participant_metadata.values():
+        for col in meta.keys():
+            if col not in python_columns and col not in extra_columns:
+                extra_columns.append(col)
 
-    # FIX: Remove original_id column if it's redundant
-    # (i.e. original_id == participant_id for all subjects)
-    def _is_redundant(col):
-        if col != 'original_id':
-            return False
-        for bids_id, metadata in participant_metadata.items():
-            orig = metadata.get('original_id', '')
-            # participant_id in TSV is f"sub-{bids_id}"
-            if orig != f"sub-{bids_id}":
-                return False
-        return True
-
-    additional_columns = [c for c in additional_columns if not _is_redundant(c)]
-
-    if not additional_columns:
-        info("  ✓ No additional metadata columns needed (original_id is redundant)")
+    if not extra_columns:
+        info("  ✓ No additional columns from LLM metadata")
         return
 
-    columns = ['participant_id'] + additional_columns
+    info(f"  Merging LLM metadata columns: {extra_columns}")
+
+    # Build base columns (same as _generate_participants_tsv_from_python)
+    columns = ['participant_id']
+    if 'original_id' in metadata_columns:
+        columns.append('original_id')
+    if 'site' in metadata_columns:
+        columns.append('site')
+    columns.extend(extra_columns)
+
     lines = ['\t'.join(columns) + '\n']
 
-    subject_ids = sorted(participant_metadata.keys(),
-                        key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
+    # Safe sort
+    def _safe_sort_key(rec):
+        bids_id = id_mapping.get(rec['original_id'], rec.get('numeric_id', '0'))
+        try:
+            return (0, int(bids_id))
+        except (ValueError, TypeError):
+            return (1, str(bids_id))
 
-    for subj_id in subject_ids:
-        metadata = participant_metadata[subj_id]
-        bids_id = f"sub-{subj_id}"
-        row = [bids_id] + [str(metadata.get(col, 'n/a')) for col in additional_columns]
+    sorted_records = sorted(subject_records, key=_safe_sort_key)
+
+    for rec in sorted_records:
+        original_id = rec['original_id']
+        bids_id = id_mapping.get(original_id, rec.get('numeric_id', '?'))
+        llm_meta = participant_metadata.get(bids_id, {})
+
+        row = [f"sub-{bids_id}"]
+        if 'original_id' in columns:
+            row.append(original_id)
+        if 'site' in columns:
+            row.append(rec.get('site', 'n/a'))
+        for col in extra_columns:
+            row.append(str(llm_meta.get(col, 'n/a')))
+
         lines.append('\t'.join(row) + '\n')
 
     participants_path.write_text(''.join(lines))
-    info(f"  ✓ Updated participants.tsv ({len(subject_ids)} subjects, "
-         f"columns: {additional_columns})")
+    info(f"  ✓ Merged participants.tsv: {len(sorted_records)} subjects, "
+         f"added columns: {extra_columns}")
 
 
 def _generate_participants_tsv_from_python(subject_info: Dict[str, Any],
@@ -564,7 +590,10 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     
     info("\nStep 5: Updating participants.tsv...")
     if 'participant_metadata' in plan_yaml:
-        _update_participants_with_metadata(plan_yaml, out_dir)
+        _merge_participants_with_metadata(
+            plan_yaml, out_dir, 
+            subject_info, id_mapping_info
+    )
     
     info(f"\n=== Complete: {plan_yaml.get('subjects', {}).get('count', 0)} subjects ===")
     

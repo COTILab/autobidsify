@@ -50,26 +50,79 @@ def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
     return "\n".join(lines)
 
 
+def _select_preferred_file(files: List[str]) -> str:
+    """
+    Select best file from duplicates using priority rules.
+    
+    Priority (universal neuroimaging conventions):
+    1. Path contains NIfTI/nifti   → explicit NIfTI format directory
+    2. Path does not contain BRIK  → exclude known duplicate format
+    3. Shortest path depth         → closest to root = most original
+    4. Alphabetical                → deterministic fallback
+    """
+    if not files:
+        return None
+    if len(files) == 1:
+        return files[0]
+    
+    def priority(f):
+        f_lower = f.lower()
+        parts = f_lower.split('/')
+        score_nifti = 0 if any('nifti' in p for p in parts) else 1
+        score_brik   = 1 if any('brik' in p for p in parts) else 0
+        score_depth  = len(parts)
+        return (score_nifti, score_brik, score_depth, f)
+    
+    return sorted(files, key=priority)[0]
+
+
 def _match_glob_pattern(filepath: str, pattern: str) -> bool:
-    """Universal glob pattern matcher."""
+    """
+    Universal glob pattern matcher.
+    
+    Handles:
+    - '**/*.nii.gz'     → match any .nii.gz file at any depth
+    - '**/BRIK/**'      → match any file inside a BRIK directory
+    - '*token*'         → match filename containing token
+    - '*.ext'           → match by extension
+    """
     filepath_lower = filepath.lower()
     pattern_lower = pattern.lower()
-    
-    if '**/' in pattern_lower:
-        pattern_lower = pattern_lower.replace('**/', '')
-    
+    parts = filepath_lower.split('/')
+
+    # Case 1: **/TOKEN/** → file has TOKEN as a directory component
+    # e.g. '**/BRIK/**' matches 'sub/anat/BRIK/scan.nii.gz'
+    if pattern_lower.startswith('**/') and pattern_lower.endswith('/**'):
+        token = pattern_lower[3:-3]  # extract 'brik' from '**/brik/**'
+        return token in parts[:-1]   # check directory parts only, not filename
+
+    # Case 2: **/*.ext → match any file with extension at any depth
+    if pattern_lower.startswith('**/'):
+        suffix = pattern_lower[3:]   # e.g. '*.nii.gz'
+        if suffix.startswith('*.'):
+            ext = suffix[1:]         # e.g. '.nii.gz'
+            return filepath_lower.endswith(ext)
+        return suffix in filepath_lower
+
+    # Case 3: *token* → match if token in filename
     if pattern_lower.startswith('*') and pattern_lower.endswith('*'):
         token = pattern_lower.strip('*')
         return token in filepath_lower
-    elif pattern_lower.startswith('*.'):
+
+    # Case 4: *.ext → match by extension in filename only
+    if pattern_lower.startswith('*.'):
         ext = pattern_lower[1:]
-        return filepath_lower.endswith(ext)
-    elif pattern_lower.endswith('*'):
+        filename = parts[-1]
+        return filename.endswith(ext)
+
+    # Case 5: token* → filename starts with token
+    if pattern_lower.endswith('*'):
         prefix = pattern_lower.rstrip('*')
-        filename = filepath.split('/')[-1].lower()
+        filename = parts[-1]
         return filename.startswith(prefix)
-    else:
-        return pattern_lower in filepath_lower
+
+    # Case 6: fallback → substring match anywhere in path
+    return pattern_lower in filepath_lower
 
 
 def analyze_filepath_universal(filepath: str, assignment_rules: List[Dict], 
@@ -365,10 +418,20 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
         
         info(f"\n  Processing {modality} files...")
         info(f"    Format ready: {format_ready}, Convert to: {convert_to}")
-        
+
         # Match files
+        exclude_patterns = mapping.get("exclude", [])
         matched_files = []
         for filepath_str in all_files_str:
+            # Apply exclude patterns first
+            if exclude_patterns:
+                excluded = any(
+                    _match_glob_pattern(filepath_str, ex_pat)
+                    for ex_pat in exclude_patterns
+                )
+                if excluded:
+                    continue
+            # Apply match patterns
             for pattern in patterns:
                 if _match_glob_pattern(filepath_str, pattern):
                     matched_files.append(filepath_str)
@@ -509,6 +572,12 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
             file_groups[group_key]['files'].append(analysis['original_filepath'])
         
         info(f"    Grouped into {len(file_groups)} scan groups")
+
+        # Deduplicate files within each group using priority rules
+        for group_key, group_data in file_groups.items():
+            if len(group_data['files']) > 1:
+                preferred = _select_preferred_file(group_data['files'])
+                group_data['files'] = [preferred]
         
         # Display subject summary
         subject_groups = {}
