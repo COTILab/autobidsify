@@ -1,108 +1,152 @@
-# auto-bidsify
+# autobidsify
 
-Automated BIDS standardization tool powered by LLM-first architecture.
+Automated Brain Imaging Data Structure (BIDS) standardization tool powered by LLM-first architecture.
+
+[![PyPI version](https://badge.fury.io/py/autobidsify.svg)](https://pypi.org/project/autobidsify/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
 
 - **General compatibility**: Handles diverse dataset structures (flat, hierarchical, multi-site)
 - **Multi-modal support**: MRI, fNIRS, and mixed modality datasets
 - **Intelligent metadata extraction**: Automatic participant demographics from DICOM headers, documents, and filenames
-- **Format conversion**: DICOM→NIfTI, CSV→SNIRF, and more
+- **Format conversion**: DICOM→NIfTI, JNIfTI→NIfTI, .mat/.nirs→SNIRF, and more
+- **Multi-LLM support**: OpenAI (gpt-4o, gpt-5.1, o1, o3) and Qwen (via Ollama or DashScope)
 - **Evidence-based reasoning**: Confidence scoring and provenance tracking for all decisions
 
 ## Supported Formats
 
 **Input formats:**
-- MRI: DICOM, NIfTI (.nii, .nii.gz)
-- fNIRS: SNIRF, Homer3 (.nirs), CSV/TSV tables
-- Documents: PDF, DOCX, TXT, Markdown, ...
+- MRI: DICOM (.dcm), NIfTI (.nii, .nii.gz), JNIfTI (.jnii, .bnii)
+- fNIRS: SNIRF (.snirf), Homer3 (.nirs), MATLAB (.mat)
+- Documents: PDF, DOCX, TXT, Markdown
 
-**Output:** BIDS-compliant dataset (v1.10.0)
+**Output:** Compliant to [BIDS specification (v1.10.0)](https://bids-specification.readthedocs.io/en/stable/)
+
+## Installation
+
+```bash
+pip install autobidsify
+```
+
+**Optional dependencies:**
+```bash
+# For DICOM conversion
+apt-get install dcm2niix          # Ubuntu/Debian
+brew install dcm2niix             # macOS
+
+# For BIDS validation
+npm install -g bids-validator
+
+# For Qwen models (local)
+# Install Ollama from https://ollama.com/download
+ollama pull qwen2.5-coder:7b
+pip install ollama
+```
+
+**Set API key:**
+```bash
+# OpenAI
+export OPENAI_API_KEY="your-key-here"
+
+# Qwen via DashScope (optional cloud alternative to Ollama)
+export DASHSCOPE_API_KEY="your-key-here"
+```
 
 ## Quick Start
 
-### Installation
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/auto-bidsify.git
-cd auto-bidsify
-
-# Setup environment
-conda create -n bidsify python=3.10
-conda activate bidsify
-pip install -r requirements.txt
-
-# Set OpenAI API key
-export OPENAI_API_KEY="your-key-here"
-```
-
-### Basic Usage
-
 ```bash
 # Full pipeline (one command)
-python cli.py full \
+autobidsify full \
   --input /path/to/your/data \
   --output outputs/my_dataset \
   --model gpt-4o \
   --modality mri
 
+# With dataset description (recommended for better metadata extraction)
+autobidsify full \
+  --input /path/to/your/data \
+  --output outputs/my_dataset \
+  --model gpt-4o \
+  --modality mri \
+  --describe "Your dataset description here"
+
 # Step-by-step execution
-python cli.py ingest --input data.zip --output outputs/run
-python cli.py evidence --output outputs/run --modality mri
-python cli.py trio --output outputs/run --model gpt-4o
-python cli.py plan --output outputs/run --model gpt-4o
-python cli.py execute --output outputs/run
-python cli.py validate --output outputs/run
+autobidsify ingest  --input data/ --output outputs/run
+autobidsify evidence --output outputs/run --modality mri
+autobidsify trio   --output outputs/run --model gpt-4o
+autobidsify plan   --output outputs/run --model gpt-4o
+autobidsify execute  --output outputs/run
+autobidsify validate --output outputs/run
 ```
 
-### Command Options
+## Command Options
 
+```
+--input PATH            Input data (archive or directory)
+--output PATH           Output directory
+--model MODEL           LLM model (default: gpt-4o)
+--modality TYPE         Data modality: mri | nirs | mixed
+--nsubjects N           Number of subjects (optional, auto-detected if omitted)
+--describe "TEXT"       Dataset description (recommended for metadata accuracy)
+--id-strategy STRATEGY  Subject ID strategy: auto | numeric | semantic (default: auto)
+```
+
+## Supported Models
+
+**OpenAI:**
 ```bash
---input PATH          Input data (archive or directory)
---output PATH         Output directory
---model MODEL         LLM model (default: gpt-4o)
---modality TYPE       Data modality: mri|nirs|mixed
---nsubjects N         Number of subjects (optional)
---describe "TEXT"     Dataset description (recommended)
+--model gpt-4o           # Recommended
+--model gpt-4o-mini      # Faster, cheaper
+--model gpt-5.1          # Latest
+```
+
+**Qwen (via Ollama, local):**
+```bash
+--model qwen3-coder-next:latest     # Recommended
+--model qwen3-coder-careful:latest  # Recommended
+--model qwen2.5-coder:7b            # Slow and sometimes inaccurate, not recommended
 ```
 
 ## Pipeline Stages
 
-| Stage |   Command   |      Input      |           Output           |               Purpose              |
-|-------|-------------|-----------------|----------------------------|------------------------------------|
-|   1   | `ingest`    | Raw data        | `ingest_info.json`         | Extract/reference data	          |
-|   2   | `evidence`  | All files       | `evidence_bundle.json`     | Analyze structure, detect subjects |
-|   3   | `classify`  | Mixed data      | `classification_plan.json` | Separate MRI/fNIRS (optional)      |
-|   4   | `trio`      | Evidence   	| BIDS trio files            | Generate metadata files            |
-|   5   | `plan`      | Evidence + trio | `BIDSPlan.yaml`            | Create conversion strategy 	  |
-|   6   | `execute`   | Plan            | `bids_compatible/`         | Execute conversions 		  |
-|   7   | `validate`  | BIDS dataset    | Validation report          | Check compliance 		  |
+| Stage | Command | Input | Output | Purpose |
+|-------|---------|-------|--------|---------|
+| 1 | `ingest` | Raw data | `ingest_info.json` | Extract/reference data |
+| 2 | `evidence` | All files | `evidence_bundle.json` | Analyze structure, detect subjects |
+| 3 | `classify` | Mixed data | `classification_plan.json` | Separate MRI/fNIRS (optional) |
+| 4 | `trio` | Evidence | BIDS trio files | Generate metadata files |
+| 5 | `plan` | Evidence + trio | `BIDSPlan.yaml` | Create conversion strategy |
+| 6 | `execute` | Plan | `bids_compatible/` | Execute conversions |
+| 7 | `validate` | BIDS dataset | Validation report | Check compliance |
 
 ## Output Structure
 
 ```
 outputs/my_dataset/
-  bids_compatible/              # Final BIDS dataset
-    dataset_description.json
-    README.md
-    participants.tsv
-    sub-001/
-      anat/
-        sub-001_T1w.nii.gz
-      func/
-        sub-001_task-rest_bold.nii.gz
-  _staging/                     # Intermediate files
-    evidence_bundle.json
-    BIDSPlan.yaml
-    conversion_log.json
+├── bids_compatible/              # Final BIDS dataset
+│   ├── dataset_description.json
+│   ├── README.md
+│   ├── participants.tsv
+│   ├── sub-001/
+│   │   ├── anat/
+│   │   │   └── sub-001_T1w.nii.gz
+│   │   └── func/
+│   │       └── sub-001_task-rest_bold.nii.gz
+│   └── derivatives/              # Unprocessed files (original structure)
+│       └── sub-001/
+│           └── ...
+└── _staging/                     # Intermediate files
+    ├── evidence_bundle.json
+    ├── BIDSPlan.yaml
+    └── conversion_log.json
 ```
 
 ## Examples
 
 ### Example 1: Single-site MRI study
 ```bash
-python cli.py full \
+autobidsify full \
   --input brain_scans/ \
   --output outputs/study1 \
   --nsubjects 50 \
@@ -112,17 +156,18 @@ python cli.py full \
 
 ### Example 2: Multi-site dataset with description
 ```bash
-python cli.py full \
+autobidsify full \
   --input camcan_data/ \
   --output outputs/camcan \
   --model gpt-4o \
   --modality mri \
+  --id-strategy semantic \
   --describe "Cambridge Centre for Ageing and Neuroscience: 650 participants, ages 18-88, multi-site MRI study"
 ```
 
-### Example 3: fNIRS dataset from CSV
+### Example 3: fNIRS dataset
 ```bash
-python cli.py full \
+autobidsify full \
   --input fnirs_study/ \
   --output outputs/fnirs \
   --model gpt-4o \
@@ -130,37 +175,45 @@ python cli.py full \
   --describe "Prefrontal cortex activation during cognitive tasks, 30 subjects"
 ```
 
+### Example 4: Using Qwen (local, no API cost)
+```bash
+ollama serve
+autobidsify full \
+  --input data/ \
+  --output outputs/run \
+  --model qwen2.5-coder:7b \
+  --modality mri
+```
+
 ## Architecture
 
 **LLM-First Design:**
-- **Python**: Deterministic operations (file I/O, format conversion, validation)
-- **LLM**: Semantic understanding (file classification, metadata extraction, pattern recognition)
-- **Hybrid**: Best of both worlds - reliability + flexibility
+- **Python**: Deterministic operations — file I/O, regex-based subject detection, format conversion, BIDS validation
+- **LLM**: Semantic understanding — dataset description, metadata extraction, scan type classification, license normalization
+- **Hybrid**: Python analyzes ALL files for completeness; LLM sees representative samples for semantic decisions
 
 ## Requirements
 
-- Python 3.10+
-- OpenAI API key
-- Optional: `dcm2niix` for DICOM conversion
-- Optional: `bids-validator` for validation
+- Python
+- OpenAI API key (or Ollama for local Qwen models)
+- `dcm2niix` for DICOM conversion
+- `bids-validator` for validation
 
 ## Current Status
 
-**Version:** 1.0 (LLM-First Architecture with Evidence-Based Reasoning)
+**Version:** 0.5.0
 
 **Tested datasets:**
-- Visible Human Project (flat structure, CT scans)
-- CamCAN (hierarchical, multi-site, 1288 subjects)
-- [Your dataset here - help us test!]
+- Visible Human Project (flat structure, DICOM CT)
+- CamCAN (hierarchical, multi-site, 30+ subjects)
+- 1-FRESH-Motor (fNIRS, existing BIDS format)
+- fNIRS tinnitus dataset (flat structure, .nirs files)
 
 **Known limitations:**
-- Classification stage (Stage 3) and mat/spreadsheet conversion is experimental
-- Some edge cases in participant metadata extraction
+- Mixed modality classification (Stage 3) is experimental
+- .mat fNIRS conversion assumes Homer3-compatible variable naming
 
 ## Contributing
 
-We need YOUR datasets to improve robustness! Please test and report:
-- Success cases
-- Failure cases  
-- Edge cases
-
+We need YOUR datasets to improve robustness. Please test and report issues at:
+https://github.com/cotilab/autobidsify/issues
