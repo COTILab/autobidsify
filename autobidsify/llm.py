@@ -356,19 +356,6 @@ def _call_llm(model: str, system_prompt: str, user_payload: str,
 # PROMPTS
 # ============================================================================
 
-PROMPT_CLASSIFICATION = """You are a neuroimaging data triage expert.
-
-Input: evidence bundle with documents[] containing full protocol text.
-
-Output JSON (ONLY valid JSON, no extra text):
-{
-  "nirs_files": ["path/to/file.csv"],
-  "mri_files": ["path/to/brain.nii.gz"],
-  "unknown_files": ["path/to/ambiguous.mat"],
-  "classification_rationale": {...},
-  "questions": [...]
-}"""
-
 PROMPT_TRIO_DATASET_DESC = """You are a BIDS dataset_description.json metadata extractor.
 
 ═══════════════════════════════════════════════════════
@@ -802,9 +789,6 @@ OUTPUT: Raw YAML only (no markdown, no explanation)
 # ============================================================================
 # LLM CALL FUNCTIONS
 # ============================================================================
-
-def llm_classify(model: str, payload: str) -> str:
-    return _call_llm(model, PROMPT_CLASSIFICATION, payload, "Classification", temperature=0.15)
 
 def llm_trio_dataset_description(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_TRIO_DATASET_DESC, payload, "Trio_DatasetDesc", temperature=0.1)

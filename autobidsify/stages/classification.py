@@ -35,54 +35,69 @@ from typing import Dict, Any, List
 import json
 from autobidsify.utils import ensure_dir, write_json, copy_file, info, warn, fatal, read_json
 from autobidsify.constants import CLASSIFICATION_PLAN, NIRS_POOL, MRI_POOL, UNKNOWN_POOL
-from autobidsify.llm import llm_classify
 
 def classify_and_stage(model: str, bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     """
-    Use LLM to classify files into NIRS/MRI/UNKNOWN pools.
-    Then physically stage files by copying to pool directories.
+    Classify files into NIRS/MRI/UNKNOWN pools by file extension.
     
-    Args:
-        model: LLM model name
-        bundle: Evidence bundle with documents
-        out_dir: Output directory
+    Deterministic classification — no LLM required.
     
-    Returns:
-        Classification plan with questions
+    MRI:   .dcm, .nii, .nii.gz, .jnii, .bnii
+    fNIRS: .snirf, .nirs, .mat
+    Other: unknown pool
     """
-    info("Calling LLM for classification...")
-    
-    # Prepare payload for LLM
-    payload = json.dumps(bundle, ensure_ascii=False)
-    
-    # Call LLM
-    try:
-        response_text = llm_classify(model, payload)
-        plan = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        fatal(f"LLM returned invalid JSON: {e}")
-        return {}
-    except Exception as e:
-        fatal(f"Classification failed: {e}")
-        return {}
-    
+    info("Classifying files by extension (deterministic)...")
+
+    MRI_EXTS   = {'.dcm', '.nii', '.nii.gz', '.jnii', '.bnii'}
+    NIRS_EXTS  = {'.snirf', '.nirs', '.mat'}
+
+    all_files = bundle.get("all_files", [])
+
+    nirs_files    = []
+    mri_files     = []
+    unknown_files = []
+
+    for relpath in all_files:
+        name_lower = relpath.lower()
+
+        if name_lower.endswith('.nii.gz'):
+            ext = '.nii.gz'
+        else:
+            ext = Path(relpath).suffix.lower()
+
+        if ext in MRI_EXTS:
+            mri_files.append(relpath)
+        elif ext in NIRS_EXTS:
+            nirs_files.append(relpath)
+        else:
+            unknown_files.append(relpath)
+
+    plan = {
+        "nirs_files":    nirs_files,
+        "mri_files":     mri_files,
+        "unknown_files": unknown_files,
+        "classification_method": "extension_based",
+        "classification_rationale": {
+            "confidence_level": "high",
+            "key_evidence_from_documents": [
+                f"MRI extensions: {sorted(MRI_EXTS)}",
+                f"fNIRS extensions: {sorted(NIRS_EXTS)}",
+                f".mat always treated as fNIRS (Homer3/MATLAB fNIRS format)"
+            ]
+        }
+    }
+
     # Save classification plan
     plan_path = Path(out_dir) / "_staging" / "classification_plan.json"
     write_json(plan_path, plan)
     info(f"✓ Classification plan saved: {plan_path}")
-    
-    # Display classification rationale if provided
-    if "classification_rationale" in plan:
-        rationale = plan["classification_rationale"]
-        info(f"Classification confidence: {rationale.get('confidence_level', 'unknown')}")
-        if "key_evidence_from_documents" in rationale:
-            info("Key evidence from documents:")
-            for evidence in rationale["key_evidence_from_documents"]:
-                info(f"  • {evidence}")
-    
+    info(f"  MRI files:   {len(mri_files)}")
+    info(f"  fNIRS files: {len(nirs_files)}")
+    info(f"  Unknown:     {len(unknown_files)}")
+
     # Stage files into pools
     _stage_files_to_pools(bundle, plan, out_dir)
-    
+
     return plan
 
 def _stage_files_to_pools(bundle: Dict[str, Any], plan: Dict[str, Any], out_dir: Path):
@@ -127,7 +142,8 @@ def _stage_files_to_pools(bundle: Dict[str, Any], plan: Dict[str, Any], out_dir:
         warn(f"{unknown_count} files could not be classified")
         warn(f"Review classification_plan.json and assign manually")
 
-def classify_files(model: str, output_dir: Path) -> None:
+# def classify_files(model: str, output_dir: Path) -> None:
+def classify_files(output_dir: Path) -> None:
     """
     High-level classification function called by CLI.
     

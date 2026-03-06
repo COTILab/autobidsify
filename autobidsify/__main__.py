@@ -136,13 +136,11 @@ Setup Ollama:
                                 help='Data modality')
     evidence_parser.add_argument('--describe', type=str,
                                 help='Additional description')
-    
+
     # Classification command
     classify_parser = subparsers.add_parser('classify', help='Classify files')
     classify_parser.add_argument('--output', type=str, required=True,
                                 help='Output directory')
-    classify_parser.add_argument('--model', type=str, default='gpt-4o',
-                                help='LLM model (OpenAI or Qwen)')
     
     # Trio command
     trio_parser = subparsers.add_parser('trio', help='Generate trio files')
@@ -298,9 +296,8 @@ def run_evidence(args):
 def run_classify(args):
     """Run file classification."""
     info("=== Classifying Files ===")
-    validate_model(args.model)
     output_dir = Path(args.output)
-    classify_files(args.model, output_dir)
+    classify_files(output_dir)
     info("✓ Classification complete")
 
 

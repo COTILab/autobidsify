@@ -119,7 +119,6 @@ QWEN_RECOMMENDED_MODELS = {
 
 TASK_TEMPERATURES = {
     "classification": 0.15,
-    # "dataset_description": 0.1,
     "dataset_description": 0.3,
     "readme": 0.4,
     "participants": 0.2,
