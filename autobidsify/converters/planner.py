@@ -491,13 +491,54 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     
     if not subject_info["success"]:
         info("  Trying flat filename analysis on ALL files...")
-        # CRITICAL: Pass ALL files, not just samples
         subject_info = _extract_subjects_from_flat_filenames(all_files, {})
-    
+
     python_subject_count = subject_info.get("subject_count", 0)
-    
+
     if subject_info["success"]:
         info(f"  ✓ Extracted {python_subject_count} subjects")
+
+    # ----------------------------------------------------------------
+    # CRITICAL: Validate extracted count against user_n_subjects
+    # If flat filename extraction is too fine-grained (e.g. VHM/VHF body
+    # parts detected as separate subjects), fall back to dominant_prefixes
+    # from filename_tokenizer which operates at token level.
+    # ----------------------------------------------------------------
+    user_n_subjects = evidence_bundle.get("user_hints", {}).get("n_subjects")
+    filename_analysis = evidence_bundle.get("filename_analysis", {})
+    dominant_prefixes = filename_analysis.get("python_statistics", {}).get("dominant_prefixes", [])
+
+    if (user_n_subjects
+            and python_subject_count != user_n_subjects
+            and len(dominant_prefixes) == user_n_subjects):
+
+        info(f"  ⚠ Extracted {python_subject_count} subjects but user specified {user_n_subjects}")
+        info(f"  → Falling back to filename token dominant prefixes: "
+             f"{[p['prefix'] for p in dominant_prefixes]}")
+
+        subject_records = []
+        for i, prefix_info in enumerate(dominant_prefixes, 1):
+            subject_records.append({
+                "original_id": prefix_info["prefix"],
+                "numeric_id": str(i),
+                "site": None,
+                "pattern_name": "dominant_prefix",
+                "file_count": prefix_info["count"]
+            })
+
+        subject_info = {
+            "success": True,
+            "method": "dominant_prefix_fallback",
+            "subject_records": subject_records,
+            "subject_count": len(subject_records),
+            "has_site_info": False,
+            "variants_by_subject": {},
+            "python_generated_filename_rules": []
+        }
+        python_subject_count = len(subject_records)
+        info(f"  ✓ Using {python_subject_count} dominant prefixes as subjects")
+        for rec in subject_records:
+            info(f"    '{rec['original_id']}': {rec['file_count']} file(s)")
     
     info("\nStep 1.5: Generating ID mapping...")
     id_mapping_info = _generate_subject_id_mapping(

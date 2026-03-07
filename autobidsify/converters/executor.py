@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import shutil
 import re
+from collections import defaultdict
 from autobidsify.utils import ensure_dir, write_json, write_yaml, copy_file, list_all_files, info, warn, read_json
 from autobidsify.converters.mri_convert import run_dcm2niix_batch, check_dcm2niix_available
 from autobidsify.converters.jnifti_converter import convert_jnifti_to_nifti, check_jnifti_support
@@ -48,6 +49,29 @@ def _build_ascii_tree(root: Path, max_depth: int = 3) -> str:
     
     walk(root)
     return "\n".join(lines)
+
+
+def _normalize_filename(filepath: str) -> str:
+    """
+    Normalize filename by stripping sequence numbers.
+    
+    Used to identify DICOM series (same series = same normalized name)
+    and detect format duplicates (same content, different format directory).
+    
+    Examples:
+        'VHFCT1mm-Hip (134).dcm' → 'vhfct1mm-hip'
+        'scan_mprage_anonymized.nii.gz' → 'scan_mprage_anonymized'
+        'scan_001.dcm' → 'scan'
+    """
+    name = filepath.split('/')[-1]
+    # Remove extension(s)
+    while '.' in name and len(name.split('.')[-1]) <= 6:
+        name = name.rsplit('.', 1)[0]
+    # Strip trailing " (N)" pattern
+    name = re.sub(r'\s*\(\d+\)\s*$', '', name)
+    # Strip trailing "_NNN" or "-NNN" numeric suffix
+    name = re.sub(r'[_\-]\d+$', '', name)
+    return name.strip().lower()
 
 
 def _select_preferred_file(files: List[str]) -> str:
@@ -231,10 +255,23 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
                 if suffix_match:
                     raw_suffix = suffix_match.group(1)
 
-                    # FIX: Remove placeholder entities like ses-X or task-X
+                    # FIX 1: Remove placeholder entities like ses-X or task-X
                     raw_suffix = re.sub(r'ses-X_?', '', raw_suffix)
                     raw_suffix = re.sub(r'task-X_?', '', raw_suffix)
                     raw_suffix = raw_suffix.strip('_')
+
+                    # FIX 2: Remove ses-VALUE if filepath has no session
+                    # directory structure (ses- in filename but not in path)
+                    # e.g. gpt-5.1 adds ses-Head when there's no ses-Head/ dir
+                    if re.search(r'ses-[A-Za-z0-9]+', raw_suffix):
+                        # Only keep ses- entity if the filepath itself contains
+                        # a matching ses- directory component
+                        has_ses_dir = bool(re.search(
+                            r'/ses-[A-Za-z0-9]+/', filepath
+                        ))
+                        if not has_ses_dir:
+                            raw_suffix = re.sub(r'ses-[A-Za-z0-9]+_?', '', raw_suffix)
+                            raw_suffix = raw_suffix.strip('_')
 
                     if raw_suffix:
                         subdir = infer_subdirectory_from_suffix(raw_suffix)
@@ -556,12 +593,27 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
             for f in matched_files
         ]
         
-        # Group files by subject and scan type
+        # Group files by subject and scan type.
+        # For DICOM files: also group by filename_base to separate scan series
+        # (e.g. VHFCT1mm-Hip vs VHFCT1mm-Head are different series, same suffix T1w)
+        # For other formats: group by subject + suffix only (existing behavior)
         file_groups = {}
         for analysis in file_analyses:
             subject_id = analysis['subject_id']
             scan_suffix = analysis['scan_type_suffix']
-            group_key = f"{subject_id}_{scan_suffix}"
+            filepath_str = analysis['original_filepath']
+
+            # Detect if file is DICOM
+            filepath_lower = filepath_str.lower()
+            is_dicom = filepath_lower.endswith('.dcm')
+
+            if is_dicom:
+                # Use filename base (normalized, no sequence number) as extra
+                # grouping dimension to separate different DICOM series
+                filename_base = _normalize_filename(filepath_str)
+                group_key = f"{subject_id}_{scan_suffix}_{filename_base}"
+            else:
+                group_key = f"{subject_id}_{scan_suffix}"
             
             if group_key not in file_groups:
                 file_groups[group_key] = {
@@ -576,12 +628,43 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
             file_groups[group_key]['files'].append(analysis['original_filepath'])
         
         info(f"    Grouped into {len(file_groups)} scan groups")
-
-        # Deduplicate files within each group using priority rules
+        
+        # Deduplicate files within each group using priority rules.
+        #
+        # Key distinction:
+        # - Same filename in different directories → format duplicates → deduplicate
+        # - Different filenames in same/different directories → multi-slice → keep all
+        #
+        # Strategy: group by normalized filename (strip trailing numbers/parens).
+        # If a normalized name appears in multiple directories → deduplicate that group.
+        # If all files have distinct normalized names → keep all (DICOM slices etc.)
         for group_key, group_data in file_groups.items():
-            if len(group_data['files']) > 1:
-                preferred = _select_preferred_file(group_data['files'])
-                group_data['files'] = [preferred]
+            if len(group_data['files']) <= 1:
+                continue
+
+            # Group files by normalized filename
+            normalized_groups: Dict[str, List[str]] = defaultdict(list)
+            for f in group_data['files']:
+                norm = _normalize_filename(f)
+                normalized_groups[norm].append(f)
+
+            # For each normalized name group: if files come from different
+            # parent directories → they are format duplicates → pick best one.
+            # If all files share the same parent directory → multi-slice → keep all.
+            deduplicated = []
+            for norm_name, norm_files in normalized_groups.items():
+                parent_dirs = set(
+                    '/'.join(f.split('/')[:-1]) for f in norm_files
+                )
+                if len(parent_dirs) > 1:
+                    # Multiple directories with same filename → format duplicates
+                    best = _select_preferred_file(norm_files)
+                    deduplicated.append(best)
+                else:
+                    # Same directory (or no directory) → multi-slice, keep all
+                    deduplicated.extend(norm_files)
+
+            group_data['files'] = deduplicated
         
         # Display subject summary
         subject_groups = {}
