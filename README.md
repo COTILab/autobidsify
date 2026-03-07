@@ -2,6 +2,7 @@
 
 Automated Brain Imaging Data Structure (BIDS) standardization tool powered by LLM-first architecture.
 
+[![Web](Web)](https://neurojson.org/Page/autobidsify)
 [![PyPI version](https://badge.fury.io/py/autobidsify.svg)](https://pypi.org/project/autobidsify/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
