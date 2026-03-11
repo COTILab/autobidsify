@@ -57,18 +57,14 @@ export DASHSCOPE_API_KEY="your-key-here"
 
 ```bash
 # Full pipeline (one command)
-autobidsify full \
-  --input /path/to/your/data \
-  --output outputs/my_dataset \
-  --model gpt-4o \
-  --modality mri
-
 # With dataset description (recommended for better metadata extraction)
 autobidsify full \
   --input /path/to/your/data \
   --output outputs/my_dataset \
   --model gpt-4o \
   --modality mri \
+  --nsubjects 10 \
+  --id-strategy numeric \
   --describe "Your dataset description here"
 
 # Step-by-step execution
