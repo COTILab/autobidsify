@@ -92,9 +92,9 @@ autobidsify validate --output outputs/run
 
 **OpenAI:**
 ```bash
---model gpt-4o           # Recommended
+--model gpt-4o           # Highly recommended, stable
 --model gpt-4o-mini      # Faster, cheaper
---model gpt-5.1          # Latest
+--model gpt-5.1          # Not that ecommended, latest
 ```
 
 **Qwen (via Ollama, local):**

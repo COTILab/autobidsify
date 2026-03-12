@@ -616,11 +616,26 @@ def execute_bids_plan(input_root: Path, output_dir: Path, plan: Dict[str, Any],
                 group_key = f"{subject_id}_{scan_suffix}"
             
             if group_key not in file_groups:
+                # For DICOM: incorporate filename_base into bids_filename
+                # to ensure different series get unique output filenames.
+                # e.g. sub-1_T1w.nii.gz → sub-1_acq-vhfct1mmhip_T1w.nii.gz
+                if is_dicom:
+                    fname_base = _normalize_filename(filepath_str)
+                    # Clean for BIDS acq label: alphanumeric only
+                    acq_label = re.sub(r'[^a-zA-Z0-9]', '', fname_base)
+                    # Insert acq- entity before the modality suffix
+                    suffix = scan_suffix
+                    bids_fname = f"sub-{subject_id}_acq-{acq_label}_{suffix}.nii.gz"
+                    subdir = analysis['subdirectory']
+                else:
+                    bids_fname = analysis['bids_filename']
+                    subdir = analysis['subdirectory']
+
                 file_groups[group_key] = {
                     'subject_id': subject_id,
                     'scan_suffix': scan_suffix,
-                    'bids_filename': analysis['bids_filename'],
-                    'subdirectory': analysis['subdirectory'],
+                    'bids_filename': bids_fname,
+                    'subdirectory': subdir,
                     'files': [],
                     'modality': modality
                 }
