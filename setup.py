@@ -14,7 +14,7 @@ def get_version():
         for line in init_file.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=")[1].strip().strip('"').strip("'")
-    return "0.5.0"
+    return "0.6.1"
 
 
 def get_long_description():
@@ -44,7 +44,7 @@ setup(
     # Flat layout - no package_dir needed
     packages=find_packages(exclude=["tests", "tests.*", "docs"]),
     
-    python_requires=">=3.7",
+    python_requires=">=3.8",
     
     install_requires=[
         "openai>=1.0.0",

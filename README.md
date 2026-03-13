@@ -195,7 +195,7 @@ autobidsify full \
 
 ## Current Status
 
-**Version:** 0.6.0
+**Version:** 0.6.1
 
 **Tested datasets:**
 - Visible Human Project (flat structure, DICOM CT)
