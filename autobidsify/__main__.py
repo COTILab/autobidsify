@@ -204,7 +204,7 @@ def run_full_pipeline(args):
     # Stage 3: Classification (if needed)
     if needs_classification:
         info("\n[3/7] Classifying files (mixed modality detected)...")
-        classify_files(args.model, output_dir)
+        classify_files(output_dir)
     else:
         info(f"\n[3/7] Skipping classification (single modality: {args.modality})...")
         info("  ✓ No classification needed for single-modality datasets")

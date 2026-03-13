@@ -74,8 +74,15 @@ docs = [
 dotenv = [
     "python-dotenv>=1.0.0",
 ]
+qwen = [
+    "ollama>=0.6.0",
+    "dashscope>=1.0.0",
+]
+jnifti = [
+    "bjdata>=0.4.0",
+]
 all = [
-    "autobidsify[dev,docs,dotenv]",
+    "autobidsify[dev,docs,dotenv,qwen,jnifti]",
 ]
 
 [project.urls]

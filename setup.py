@@ -69,6 +69,13 @@ setup(
             "ruff>=0.1.0",
             "mypy>=1.0",
         ],
+        "qwen": [
+        "ollama>=0.6.0",
+        "dashscope>=1.0.0",
+        ],
+        "jnifti": [
+        "bjdata>=0.4.0",
+        ],
     },
     
     entry_points={
