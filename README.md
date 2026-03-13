@@ -64,7 +64,7 @@ autobidsify full \
   --model gpt-4o \
   --modality mri \
   --nsubjects 10 \
-  --id-strategy numeric \
+  --id-strategy auto \
   --describe "Your dataset description here"
 
 # Step-by-step execution
@@ -168,24 +168,15 @@ autobidsify full \
   --describe "Multi-site dataset with description"
 ```
 
-### Example 3: fNIRS dataset
+### Example 3: fNIRS dataset using Qwen (local, no API cost)
 ```bash
 autobidsify full \
   --input fnirs_study/ \
   --output outputs/fnirs \
-  --model gpt-4o \
+  --model qwen3-coder-next:latest \
   --modality nirs \
-  --describe "Prefrontal cortex activation during cognitive tasks, 30 subjects"
-```
-
-### Example 4: Using Qwen (local, no API cost)
-```bash
-ollama serve
-autobidsify full \
-  --input data/ \
-  --output outputs/run \
-  --model qwen2.5-coder:7b \
-  --modality mri
+  --id-strategy auto \
+  --describe "fNIRS dataset"
 ```
 
 ## Architecture
@@ -209,7 +200,7 @@ autobidsify full \
 **Tested datasets:**
 - Visible Human Project (flat structure, DICOM CT)
 - CamCAN (hierarchical, multi-site, 30+ subjects)
-- 1-FRESH-Motor (fNIRS, existing BIDS format)
+- FRESH-Motor (fNIRS, existing BIDS format)
 - fNIRS tinnitus dataset (flat structure, .nirs files)
 
 **Known limitations:**
