@@ -101,7 +101,7 @@ autobidsify validate --output outputs/run
 ```bash
 --model qwen3-coder-next:latest     # Recommended
 --model qwen3-coder-careful:latest  # Recommended
---model qwen2.5-coder:7b            # Slow and sometimes inaccurate, not recommended
+--model qwen2.5-coder:7b            # Not recommended, slow and sometimes inaccurate, 
 ```
 
 **Qwen (via rest-api):**
@@ -153,6 +153,8 @@ autobidsify full \
   --nsubjects 50 \
   --model gpt-4o \
   --modality mri
+  --id-strategy auto \
+  --describe "Single-site MRI study"
 ```
 
 ### Example 2: Multi-site dataset with description
@@ -163,7 +165,7 @@ autobidsify full \
   --model gpt-4o \
   --modality mri \
   --id-strategy semantic \
-  --describe "Cambridge Centre for Ageing and Neuroscience: 650 participants, ages 18-88, multi-site MRI study"
+  --describe "Multi-site dataset with description"
 ```
 
 ### Example 3: fNIRS dataset
