@@ -13,7 +13,7 @@ jobs:
       matrix:
         # Only test versions listed in pyproject.toml classifiers.
         # 3.14 is alpha and unstable on Actions; 3.7-3.9 are EOL.
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout repository
