@@ -81,6 +81,7 @@ def normalize_license_locally(license_str: str) -> Optional[str]:
             'CC0', 'CC010', 'CC01',
             'CREATIVECOMMONSZERO', 'CREATIVECOMMONS0',
             'CC0UNIVERSALPUBLICDOMAIN', 'CC010UNIVERSAL',
+            'CC0UNIVERSAL',
             'ZERORIGHTSPUBLICDOMAIN', 'CC0LICENSE',
         ],
         'PD': [

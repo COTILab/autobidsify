@@ -425,32 +425,12 @@ class UniversalFileMatcher:
     def parse_pattern_features(pattern: str) -> Dict[str, Any]:
         """
         Convert glob/regex pattern to structured features.
-        
-        This is the key innovation: instead of parsing regex at runtime,
-        we extract semantic features once.
-        
+
         Examples:
-            "**/*.nii.gz" -> {
-                "extension": ".nii.gz",
-                "path_keywords": []
-            }
-            
-            "**/anat_mprage_anonymized/*.nii.gz" -> {
-                "path_keywords": ["anat", "mprage", "anonymized"],
-                "extension": ".nii.gz"
-            }
-            
-            "VHM.*-Head.*\\.dcm" -> {
-                "filename_prefix": "vhm",
-                "filename_keywords": ["head"],
-                "extension": ".dcm"
-            }
-        
-        Args:
-            pattern: Glob or regex pattern string
-        
-        Returns:
-            Structured feature dict
+            "**/*.nii.gz"                        -> extension=".nii.gz", path_keywords=[]
+            "**/anat_mprage_anonymized/*.nii.gz" -> extension=".nii.gz",
+                                                    path_keywords=["anat","mprage","anonymized"]
+            "VHM.*-Head.*\\.dcm"                 -> extension=".dcm", filename_prefix="vhm"
         """
         features = {
             "type": "unknown",
@@ -460,47 +440,74 @@ class UniversalFileMatcher:
             "extension": None,
             "exclude_keywords": []
         }
-        
-        # Detect pattern type
+
         if "**" in pattern:
             features["type"] = "path_pattern"
-            
-            # Extract path keywords
-            parts = pattern.replace("**", "|").split("|")
-            
-            for part in parts:
-                part_clean = part.strip("/*")
-                
-                # Extract extension
-                if part_clean.startswith("*."):
-                    features["extension"] = part_clean[1:].lower()
-                # Extract path keywords
-                elif part_clean and "*" not in part_clean:
-                    subparts = part_clean.split("/")
-                    for subpart in subparts:
-                        words = re.findall(r'[A-Za-z_]{3,}', subpart)
-                        features["path_keywords"].extend([w.lower() for w in words])
+
+            # Split on "**" to get the segments between wildcards.
+            # e.g. "**/anat_mprage_anonymized/*.nii.gz"
+            #   -> ["", "/anat_mprage_anonymized/", ".nii.gz"]  (after split on **)
+            # We then look for:
+            #   - A segment ending with *.EXT  -> extract extension (with leading dot)
+            #   - A segment containing a directory name -> extract keywords
+            segments = pattern.split("**")
+
+            for seg in segments:
+                seg = seg.strip("/")
+                if not seg:
+                    continue
+
+                # Case 1: "*.nii.gz" or "*.dcm" — extension pattern
+                if seg.startswith("*."):
+                    # Keep the leading dot so endswith() works correctly
+                    features["extension"] = seg[1:]   # e.g. ".nii.gz"
+
+                # Case 2: directory segment like "anat_mprage_anonymized"
+                # or "anat_mprage_anonymized/*.nii.gz"
+                else:
+                    # Strip any trailing "/*.ext" part first
+                    dir_part = seg.split("/")[0] if "/" in seg else seg
+                    if dir_part and not dir_part.startswith("*"):
+                        # Split on underscores and hyphens to get keywords
+                        words = re.split(r'[_\-]', dir_part)
+                        for word in words:
+                            # Keep only alphabetic words of length >= 3
+                            word_clean = re.sub(r'[^A-Za-z]', '', word)
+                            if len(word_clean) >= 3:
+                                features["path_keywords"].append(word_clean.lower())
+
+                    # Also check if there is an extension in a trailing "/*.ext"
+                    if "/" in seg:
+                        trailing = seg.split("/")[-1]
+                        if trailing.startswith("*."):
+                            features["extension"] = trailing[1:]  # e.g. ".nii.gz"
+
         else:
+            # Filename-based regex/glob pattern (no **)
             features["type"] = "filename_pattern"
-            
-            # Extract filename prefix
+
+            # Extract filename prefix (leading alphanumeric chars)
             if match := re.match(r'^([A-Za-z0-9]+)', pattern):
                 features["filename_prefix"] = match.group(1).lower()
-            
-            # Extract filename keywords
+
+            # Extract filename keywords (words after delimiters)
             keywords = re.findall(r'[-_]([A-Za-z]{3,})', pattern)
             features["filename_keywords"] = [k.lower() for k in keywords]
-            
-            # Extract extension
+
+            # Extract extension — check for escaped dot patterns first
             if r'\.dcm' in pattern or pattern.endswith('.dcm'):
                 features["extension"] = ".dcm"
             elif r'\.nii\.gz' in pattern or pattern.endswith('.nii.gz'):
                 features["extension"] = ".nii.gz"
             elif r'\.nii' in pattern or pattern.endswith('.nii'):
                 features["extension"] = ".nii"
-        
+            elif r'\.snirf' in pattern or pattern.endswith('.snirf'):
+                features["extension"] = ".snirf"
+            elif r'\.mat' in pattern or pattern.endswith('.mat'):
+                features["extension"] = ".mat"
+
         return features
-    
+
     @staticmethod
     def match_file(file_relpath: str, pattern_features: Dict[str, Any]) -> bool:
         """
