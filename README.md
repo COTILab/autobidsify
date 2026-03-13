@@ -104,6 +104,11 @@ autobidsify validate --output outputs/run
 --model qwen2.5-coder:7b            # Slow and sometimes inaccurate, not recommended
 ```
 
+**Qwen (via rest-api):**
+```bash
+export OLLAMA_BASE_URL=http://your-server.com:xxxx
+```
+
 ## Pipeline Stages
 
 | Stage | Command | Input | Output | Purpose |

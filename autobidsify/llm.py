@@ -267,31 +267,117 @@ def _call_qwen_api(model: str, system_prompt: str, user_payload: str,
     except Exception as e:
         raise LLMHardFail(step, "QwenAPIError", str(e))
 
+# ============================================================================
+# Qwen Client via Ollama REST API (remote, no local installation required)
+# ============================================================================
+
+def _call_qwen_rest_api(model: str, system_prompt: str, user_payload: str,
+                        step: str, temperature: Optional[float] = None) -> str:
+    """
+    Call Qwen via a remote Ollama REST API endpoint.
+
+    Does NOT require the ollama Python package or a local Ollama installation.
+    Only requires the requests library (standard dependency).
+
+    Setup:
+        Set environment variable pointing to your remote Ollama server:
+        export OLLAMA_BASE_URL=http://your-server.com:11434
+
+    The Ollama REST API is OpenAI-compatible, using endpoint:
+        POST {OLLAMA_BASE_URL}/api/chat
+    """
+    try:
+        import requests
+    except ImportError:
+        raise LLMHardFail(step, "RequestsNotInstalled",
+                          "requests library not installed. Install with: pip install requests")
+
+    base_url = os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
+    # This should never be called without OLLAMA_BASE_URL set,
+    # but guard defensively anyway.
+    if not base_url:
+        raise LLMHardFail(step, "MissingOllamaBaseURL",
+                          "OLLAMA_BASE_URL environment variable is not set.")
+
+    endpoint = f"{base_url}/api/chat"
+
+    payload: dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_payload},
+        ],
+        "stream": False,   # get full response in one shot
+        "options": {"top_p": 0.8},
+    }
+    if temperature is not None:
+        payload["options"]["temperature"] = temperature
+
+    try:
+        response = requests.post(endpoint, json=payload, timeout=300)
+        response.raise_for_status()          # raises HTTPError for 4xx / 5xx
+        data = response.json()
+
+        # Ollama REST response shape:
+        # {"message": {"role": "assistant", "content": "..."}, ...}
+        content = data.get("message", {}).get("content", "")
+        if content and content.strip():
+            return content.strip()
+        else:
+            raise LLMHardFail(step, "EmptyResponse",
+                              "Ollama REST API returned empty content")
+
+    except requests.exceptions.ConnectionError:
+        raise LLMHardFail(step, "OllamaRESTUnreachable",
+                          f"Cannot reach Ollama REST API at {base_url}. "
+                          "Check that the server is running and the URL is correct.")
+    except requests.exceptions.Timeout:
+        raise LLMHardFail(step, "OllamaRESTTimeout",
+                          f"Ollama REST API timed out at {base_url}.")
+    except requests.exceptions.HTTPError as e:
+        raise LLMHardFail(step, "OllamaRESTHTTPError", str(e))
+    except Exception as e:
+        raise LLMHardFail(step, "OllamaRESTError", str(e))
 
 def _call_qwen(model: str, system_prompt: str, user_payload: str,
-              step: str, temperature: Optional[float] = None) -> str:
+               step: str, temperature: Optional[float] = None) -> str:
     """
-    Call Qwen model - tries Ollama first, falls back to API.
-    
-    Priority:
-    1. Try Ollama (local, free) if available
-    2. Fall back to DashScope API if Ollama fails
+    Call Qwen model.
+
+    Priority order:
+    1. OLLAMA_BASE_URL set → remote Ollama REST API (no local install needed)
+    2. ollama Python package available → local Ollama process
+    3. DASHSCOPE_API_KEY set → DashScope cloud API
+    4. None of the above → fatal with instructions
     """
-    # Try Ollama first
+    # ── Priority 1: Remote Ollama REST API ───────────────────────────────
+    if os.getenv("OLLAMA_BASE_URL"):
+        info(f"Using remote Ollama REST API: {os.getenv('OLLAMA_BASE_URL')}")
+        return _call_qwen_rest_api(model, system_prompt, user_payload,
+                                   step, temperature)
+
+    # ── Priority 2: Local Ollama Python package ───────────────────────────
     try:
-        return _call_qwen_ollama(model, system_prompt, user_payload, step, temperature)
+        return _call_qwen_ollama(model, system_prompt, user_payload,
+                                 step, temperature)
     except LLMHardFail as e:
-        # If Ollama not available, try DashScope API
         if e.error_type in ["OllamaNotInstalled", "OllamaNotRunning", "ModelNotFound"]:
+
+            # ── Priority 3: DashScope cloud API ──────────────────────────
             if os.getenv("DASHSCOPE_API_KEY"):
-                warn(f"Ollama not available, trying DashScope API...")
-                return _call_qwen_api(model, system_prompt, user_payload, step, temperature)
+                warn("Ollama not available, trying DashScope API...")
+                return _call_qwen_api(model, system_prompt, user_payload,
+                                      step, temperature)
+
+            # ── Priority 4: Nothing available ────────────────────────────
             else:
-                fatal("Qwen model requires either:")
-                fatal("  Option 1: Ollama (local, free)")
+                fatal("Qwen model requires one of:")
+                fatal("  Option 1: Remote Ollama REST API (no local install)")
+                fatal("    - Set: export OLLAMA_BASE_URL=http://your-server:11434")
+                fatal("  Option 2: Local Ollama")
                 fatal("    - Start: ollama serve")
-                fatal("    - Pull: ollama pull qwen2.5-coder:7b")
-                fatal("  Option 2: DashScope API (cloud)")
+                fatal("    - Pull:  ollama pull qwen2.5-coder:7b")
+                fatal("  Option 3: DashScope API (cloud)")
                 fatal("    - Get key: https://dashscope.console.aliyun.com/")
                 fatal("    - Set: export DASHSCOPE_API_KEY='sk-...'")
         else:
