@@ -23,6 +23,7 @@ wheels/
 # Virtual environments
 venv/
 env/
+env_new/
 ENV/
 .venv/
 auto_bidsify/
@@ -38,6 +39,7 @@ auto_bidsify/
 # Project specific - Data directories
 datasets/
 outputs/
+outputs_new/
 
 # Project specific - Staging and temp
 _staging/
