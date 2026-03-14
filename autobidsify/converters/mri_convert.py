@@ -12,7 +12,17 @@ from scipy.io import loadmat
 from autobidsify.utils import ensure_dir, warn, info, write_json
 
 def check_dcm2niix_available() -> bool:
-    """Check if dcm2niix is installed and available."""
+    """
+    Check if dcm2niix binary is available.
+
+    Detection order:
+    1. pip-installed dcm2niix  → binary lands in venv/bin/, found by shutil.which()
+    2. System-level dcm2niix   → apt/brew install, also found by shutil.which()
+
+    Both routes resolve through the same shutil.which() call because the pip
+    package places the compiled binary on PATH automatically upon installation.
+    No 'import dcm2niix' is needed — the package exposes no Python API.
+    """
     return shutil.which("dcm2niix") is not None
 
 def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path, 
@@ -32,8 +42,10 @@ def run_dcm2niix_batch(dicom_files: List[Path], output_path: Path,
     """
     if not check_dcm2niix_available():
         if not quiet:
-            warn("dcm2niix not found in PATH")
-            warn("Install with: apt-get install dcm2niix (Ubuntu) or brew install dcm2niix (macOS)")
+            warn("dcm2niix not found. Install via one of:")
+            warn("  Option 1 (recommended): pip install dcm2niix")
+            warn("  Option 2 (system):      apt-get install dcm2niix  # Ubuntu/Debian")
+            warn("  Option 3 (system):      brew install dcm2niix     # macOS")
         return None
     
     if not dicom_files:
@@ -129,8 +141,11 @@ def run_dcm2niix(dicom_dir: Path, output_dir: Path) -> List[Path]:
     """
     dcm2niix_path = shutil.which("dcm2niix")
     if not dcm2niix_path:
-        warn("dcm2niix not found in PATH. Skipping DICOM conversion.")
-        warn("Install with: apt-get install dcm2niix (Ubuntu) or brew install dcm2niix (macOS)")
+        warn("dcm2niix not found. Skipping DICOM conversion.")
+        warn("Install via one of:")
+        warn("  Option 1 (recommended): pip install dcm2niix")
+        warn("  Option 2 (system):      apt-get install dcm2niix  # Ubuntu/Debian")
+        warn("  Option 3 (system):      brew install dcm2niix     # macOS")
         return []
     
     ensure_dir(output_dir)

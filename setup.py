@@ -59,6 +59,7 @@ setup(
         "pandas>=1.3.0",
         "scipy>=1.7.0",
         "openpyxl>=3.1.0",
+        "dcm2niix>=1.0.20220720",
     ],
     
     extras_require={
