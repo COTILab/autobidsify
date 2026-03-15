@@ -11,7 +11,7 @@ Automated Brain Imaging Data Structure (BIDS) standardization tool powered by LL
 - **Multi-modal support**: MRI, fNIRS, and mixed modality datasets
 - **Intelligent metadata extraction**: Automatic participant demographics from DICOM headers, documents, and filenames
 - **Format conversion**: DICOM→NIfTI, JNIfTI→NIfTI, .mat/.nirs→SNIRF, and more
-- **Multi-LLM support**: OpenAI (gpt-4o, gpt-5.1, o1, o3) and Qwen (via Ollama or DashScope)
+- **Multi-LLM support**: OpenAI (gpt-4o, gpt-5.1) and Qwen (via Ollama locally or with rest-api or DashScope)
 - **Evidence-based reasoning**: Confidence scoring and provenance tracking for all decisions
 
 ## Supported Formats
@@ -31,17 +31,8 @@ pip install autobidsify
 
 **Optional dependencies:**
 ```bash
-# For DICOM conversion
-apt-get install dcm2niix          # Ubuntu/Debian
-brew install dcm2niix             # macOS
-
 # For BIDS validation
 npm install -g bids-validator
-
-# For Qwen models (local)
-# Install Ollama from https://ollama.com/download
-ollama pull qwen2.5-coder:7b
-pip install ollama
 ```
 
 **Set API key:**
@@ -115,10 +106,10 @@ export OLLAMA_BASE_URL=http://your-server.com:xxxx
 |-------|---------|-------|--------|---------|
 | 1 | `ingest` | Raw data | `ingest_info.json` | Extract/reference data |
 | 2 | `evidence` | All files | `evidence_bundle.json` | Analyze structure, detect subjects |
-| 3 | `classify` | Mixed data | `classification_plan.json` | Separate MRI/fNIRS (optional) |
+| 3 | `classify` | Mixed data | `classification_plan.json`, `nirs_pool/`, `mri_pool/`, `unknown/` | Separate MRI/fNIRS (optional) |
 | 4 | `trio` | Evidence | BIDS trio files | Generate metadata files |
-| 5 | `plan` | Evidence + trio | `BIDSPlan.yaml` | Create conversion strategy |
-| 6 | `execute` | Plan | `bids_compatible/` | Execute conversions |
+| 5 | `plan` | Evidence + trio | `BIDSPlan.yaml`, `subject_analysis.json` | Create conversion strategy |
+| 6 | `execute` | Plan | `bids_compatible/`, `coversion_log.json`, `BIDSManifest.yaml` | Execute conversions |
 | 7 | `validate` | BIDS dataset | Validation report | Check compliance |
 
 ## Output Structure
@@ -143,42 +134,6 @@ outputs/my_dataset/
     └── conversion_log.json
 ```
 
-## Examples
-
-### Example 1: Single-site MRI study
-```bash
-autobidsify full \
-  --input brain_scans/ \
-  --output outputs/study1 \
-  --nsubjects 50 \
-  --model gpt-4o \
-  --modality mri
-  --id-strategy auto \
-  --describe "Single-site MRI study"
-```
-
-### Example 2: Multi-site dataset with description
-```bash
-autobidsify full \
-  --input camcan_data/ \
-  --output outputs/camcan \
-  --model gpt-4o \
-  --modality mri \
-  --id-strategy semantic \
-  --describe "Multi-site dataset with description"
-```
-
-### Example 3: fNIRS dataset using Qwen (local, no API cost)
-```bash
-autobidsify full \
-  --input fnirs_study/ \
-  --output outputs/fnirs \
-  --model qwen3-coder-next:latest \
-  --modality nirs \
-  --id-strategy auto \
-  --describe "fNIRS dataset"
-```
-
 ## Architecture
 
 **LLM-First Design:**
@@ -190,7 +145,6 @@ autobidsify full \
 
 - Python
 - OpenAI API key (or Ollama for local Qwen models)
-- `dcm2niix` for DICOM conversion
 - `bids-validator` for validation
 
 ## Current Status
