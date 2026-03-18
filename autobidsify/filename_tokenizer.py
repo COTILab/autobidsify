@@ -4,7 +4,7 @@
 """
 Universal Filename Tokenizer
 
-Philosophy:
+How it works:
 - Python: Statistical analysis of filename patterns (NO interpretation)
 - LLM: Semantic understanding of what tokens mean
 - User: Final validation when ambiguous

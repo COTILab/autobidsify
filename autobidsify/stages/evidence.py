@@ -833,7 +833,7 @@ def _collect_participant_metadata_evidence(
 
     # Evidence 5: balanced prefix distribution
     info("  [Evidence 5/5] Analyzing subject grouping patterns...")
-    from filename_tokenizer import FilenamePatternAnalyzer
+    from autobidsify.filename_tokenizer import FilenamePatternAnalyzer
     filenames = [f.split('/')[-1] for f in all_files]
     stats     = FilenamePatternAnalyzer(filenames).analyze_token_statistics()
     dominant  = stats.get('dominant_prefixes', [])

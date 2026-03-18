@@ -55,125 +55,249 @@ def validate_model(model: str) -> None:
 
 
 def setup_parser():
-    """Setup command-line argument parser with Qwen support."""
+    """Setup command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="BIDS Standardization Pipeline v10 (OpenAI + Qwen support)",
+        prog="autobidsify",
+        description=(
+            "autobidsify v0.6.2 — Automated BIDS Standardization Tool\n"
+            "Powered by LLM-first architecture.\n"
+            "\n"
+            "Supports MRI (.dcm, .nii, .nii.gz, .jnii, .bnii) and\n"
+            "fNIRS (.snirf, .nirs, .mat) datasets.\n"
+            "Output complies with BIDS specification v1.10.0.\n"
+            "\n"
+            "Website:  https://neurojson.org/Page/autobidsify\n"
+            "Issues:   https://github.com/cotilab/autobidsify/issues"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Run full pipeline in one command
+  autobidsify full \\
+    --input /path/to/data \\
+    --output outputs/my_dataset \\
+    --model gpt-4o \\
+    --modality mri \\
+    --nsubjects 10 \\
+    --id-strategy auto \\
+    --describe "Your dataset description here"
+
+  # Run step by step
+  autobidsify ingest   --input data/ --output outputs/run
+  autobidsify evidence --output outputs/run --modality mri
+  autobidsify trio     --output outputs/run --model gpt-4o
+  autobidsify plan     --output outputs/run --model gpt-4o
+  autobidsify execute  --output outputs/run
+  autobidsify validate --output outputs/run
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUPPORTED MODELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OpenAI (requires OPENAI_API_KEY):
+    --model gpt-4o              Recommended, stable
+    --model gpt-4o-mini         Faster, cheaper
+    --model gpt-5.1             Latest
+
+  Qwen via local Ollama:
+    --model qwen3-coder-next:latest     Recommended
+    --model qwen3-coder-careful:latest  Recommended
+    --model qwen2.5-coder:7b            Not recommended
+
+  Qwen via remote Ollama REST API (no local install required):
+    export OLLAMA_BASE_URL=http://your-server.com:11434
+    --model qwen3-coder-next:latest
+
+  Qwen via DashScope cloud API (requires DASHSCOPE_API_KEY):
+    --model qwen-max / qwen-plus / qwen-turbo
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE STAGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Stage 1  ingest    Extract or reference raw data
+  Stage 2  evidence  Analyze structure, detect subjects
+  Stage 3  classify  Separate MRI/fNIRS (mixed modality only)
+  Stage 4  trio      Generate dataset_description.json, README, participants.tsv
+  Stage 5  plan      Create BIDSPlan.yaml conversion strategy
+  Stage 6  execute   Run conversions, output bids_compatible/
+  Stage 7  validate  Check BIDS compliance
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENVIRONMENT VARIABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OPENAI_API_KEY      Required for OpenAI models
+  DASHSCOPE_API_KEY   Required for Qwen via DashScope
+  OLLAMA_BASE_URL     Remote Ollama server (e.g. http://host:11434)
+"""
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Pipeline command')
+
+    # ── full ──────────────────────────────────────────────────────────────────
+    full_parser = subparsers.add_parser(
+        'full',
+        help='Run full pipeline (stages 1-7)',
+        description='Run the complete autobidsify pipeline from raw data to validated BIDS dataset.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
 
-  # Using OpenAI (default)
-  python cli.py full --input data/ --output bids_out --model gpt-4o
-  
-  # Using Qwen (via Ollama) - Recommended for coding tasks
-  python cli.py full --input data/ --output bids_out --model qwen2.5-coder:7b
-  
-  # Using Qwen - General purpose
-  python cli.py full --input data/ --output bids_out --model qwen2.5:14b
-  
-  # Using Qwen - Lightweight
-  python cli.py full --input data/ --output bids_out --model qwen2.5:7b
-  
-  # With custom ID strategy
-  python cli.py full --input data/ --output bids_out \\
-    --model qwen2.5-coder:14b --id-strategy numeric
+  # MRI dataset
+  autobidsify full \\
+    --input brain_scans/ \\
+    --output outputs/study1 \\
+    --model gpt-4o \\
+    --modality mri \\
+    --nsubjects 30 \\
+    --id-strategy numeric \\
+    --describe "Single-site T1w MRI study, 30 healthy adults"
 
-Supported Qwen Models (via Ollama):
-  General:
-    - qwen2.5:7b         (Balanced, 4.7GB)
-    - qwen2.5:14b        (Better performance)
-    - qwen2.5:32b        (Strong performance)
-    - qwen3:8b           (Latest generation)
-  
-  Coding (Recommended for BIDS pipeline):
-    - qwen2.5-coder:7b   (Code-optimized, recommended)
-    - qwen2.5-coder:14b  (Better code understanding)
-    - qwen2.5-coder:32b  (Near GPT-4o performance)
+  # fNIRS dataset
+  autobidsify full \\
+    --input fnirs_data/ \\
+    --output outputs/fnirs \\
+    --model gpt-4o \\
+    --modality nirs \\
+    --describe "Prefrontal fNIRS, 20 subjects, resting state"
 
-Setup Ollama:
-  1. Install: https://ollama.com/download
-  2. Start: ollama serve
-  3. Pull model: ollama pull qwen2.5-coder:7b
-  4. Install Python lib: pip install ollama
-        """
+  # Using Qwen via remote Ollama (no local install required)
+  export OLLAMA_BASE_URL=http://your-server.com:11434
+  autobidsify full \\
+    --input data/ \\
+    --output outputs/run \\
+    --model qwen3-coder-next:latest \\
+    --modality mri
+"""
     )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Pipeline command')
-    
-    # Full pipeline command
-    full_parser = subparsers.add_parser('full', help='Run full pipeline')
-    full_parser.add_argument('--input', type=str, required=True,
-                            help='Input data path (file or directory)')
+    full_parser.add_argument('--input',  type=str, required=True,
+                             help='Input data path (directory or archive file)')
     full_parser.add_argument('--output', type=str, required=True,
-                            help='Output directory for BIDS dataset')
-    full_parser.add_argument('--nsubjects', type=int, default=None,
-                            help='Number of subjects (optional, will auto-detect if not provided)')
+                             help='Output directory for the BIDS dataset')
+    full_parser.add_argument('--model',  type=str, default='gpt-4o',
+                             help='LLM model (default: gpt-4o). '
+                                  'OpenAI: gpt-4o, gpt-4o-mini, gpt-5.1. '
+                                  'Qwen: qwen3-coder-next:latest, qwen2.5-coder:7b')
     full_parser.add_argument('--modality', choices=['mri', 'nirs', 'mixed'],
-                            help='Data modality (optional, will detect if not provided)')
+                             help='Data modality: mri | nirs | mixed '
+                                  '(auto-detected if omitted)')
+    full_parser.add_argument('--nsubjects', type=int, default=None,
+                             help='Number of subjects (auto-detected if omitted)')
     full_parser.add_argument('--describe', type=str,
-                            help='Additional description or notes about the dataset')
-    full_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model: OpenAI (gpt-4o, gpt-4o-mini) or Qwen (qwen2.5-coder:7b, qwen2.5:14b, etc.)')
+                             help='Dataset description text — strongly recommended '
+                                  'for accurate metadata extraction')
     full_parser.add_argument('--id-strategy', type=str,
-                            choices=['auto', 'numeric', 'semantic'],
-                            default='auto',
-                            help='Subject ID strategy (auto/numeric/semantic)')
-    
-    # Ingest command
-    ingest_parser = subparsers.add_parser('ingest', help='Ingest data')
-    ingest_parser.add_argument('--input', type=str, required=True,
-                              help='Input data path (file or directory)')
-    ingest_parser.add_argument('--output', type=str, required=True,
-                              help='Output directory')
-    
-    # Evidence command
-    evidence_parser = subparsers.add_parser('evidence', help='Build evidence bundle')
-    evidence_parser.add_argument('--output', type=str, required=True,
-                                help='Output directory')
-    evidence_parser.add_argument('--nsubjects', type=int, default=None,
-                                help='Number of subjects (optional, will auto-detect)')
-    evidence_parser.add_argument('--modality', choices=['mri', 'nirs', 'mixed'],
-                                help='Data modality')
-    evidence_parser.add_argument('--describe', type=str,
-                                help='Additional description')
+                             choices=['auto', 'numeric', 'semantic'],
+                             default='auto',
+                             help='Subject ID strategy: '
+                                  'auto (default) | numeric (sub-1, sub-2) | '
+                                  'semantic (preserve original IDs)')
 
-    # Classification command
-    classify_parser = subparsers.add_parser('classify', help='Classify files')
+    # ── ingest ────────────────────────────────────────────────────────────────
+    ingest_parser = subparsers.add_parser(
+        'ingest',
+        help='Stage 1 — Extract or reference raw data',
+        description='Stage 1: Ingest raw data. '
+                    'Archives (.zip, .tar.gz) are extracted to _staging/extracted/. '
+                    'Directories are referenced in-place (no copying).',
+    )
+    ingest_parser.add_argument('--input',  type=str, required=True,
+                               help='Input path (directory or archive)')
+    ingest_parser.add_argument('--output', type=str, required=True,
+                               help='Output directory')
+
+    # ── evidence ──────────────────────────────────────────────────────────────
+    evidence_parser = subparsers.add_parser(
+        'evidence',
+        help='Stage 2 — Analyze structure, detect subjects',
+        description='Stage 2: Build evidence bundle. '
+                    'Scans all files, detects subject identifiers, '
+                    'extracts DICOM/NIfTI/SNIRF headers, and collects '
+                    'participant metadata evidence. '
+                    'Saves _staging/evidence_bundle.json.',
+    )
+    evidence_parser.add_argument('--output',    type=str, required=True,
+                                 help='Output directory (must contain _staging/ingest_info.json)')
+    evidence_parser.add_argument('--nsubjects', type=int, default=None,
+                                 help='Number of subjects (auto-detected if omitted)')
+    evidence_parser.add_argument('--modality',  choices=['mri', 'nirs', 'mixed'],
+                                 help='Data modality')
+    evidence_parser.add_argument('--describe',  type=str,
+                                 help='Dataset description')
+
+    # ── classify ──────────────────────────────────────────────────────────────
+    classify_parser = subparsers.add_parser(
+        'classify',
+        help='Stage 3 — Separate MRI/fNIRS files (mixed modality only)',
+        description='Stage 3: Classify files by extension into MRI/fNIRS/unknown pools. '
+                    'Only needed for mixed-modality datasets. '
+                    'Single-modality datasets skip this stage automatically.',
+    )
     classify_parser.add_argument('--output', type=str, required=True,
-                                help='Output directory')
-    
-    # Trio command
-    trio_parser = subparsers.add_parser('trio', help='Generate trio files')
+                                 help='Output directory')
+
+    # ── trio ──────────────────────────────────────────────────────────────────
+    trio_parser = subparsers.add_parser(
+        'trio',
+        help='Stage 4 — Generate BIDS trio files (dataset_description, README, participants)',
+        description='Stage 4: Generate the three required BIDS metadata files: '
+                    'dataset_description.json, README.md, and participants.tsv. '
+                    'Uses LLM to extract metadata from the evidence bundle.',
+    )
     trio_parser.add_argument('--output', type=str, required=True,
-                            help='Output directory')
-    trio_parser.add_argument('--file', type=str,
-                            choices=['dataset_description', 'readme', 'participants', 'all'],
-                            default='all',
-                            help='Which trio file(s) to generate')
-    trio_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model (OpenAI or Qwen)')
-    
-    # Plan command
-    plan_parser = subparsers.add_parser('plan', help='Generate BIDS plan')
+                             help='Output directory')
+    trio_parser.add_argument('--model',  type=str, default='gpt-4o',
+                             help='LLM model (default: gpt-4o)')
+    trio_parser.add_argument('--file',
+                             choices=['dataset_description', 'readme', 'participants', 'all'],
+                             default='all',
+                             help='Which file to generate (default: all)')
+
+    # ── plan ──────────────────────────────────────────────────────────────────
+    plan_parser = subparsers.add_parser(
+        'plan',
+        help='Stage 5 — Generate BIDSPlan.yaml conversion strategy',
+        description='Stage 5: Generate the BIDS conversion plan. '
+                    'Python extracts subject IDs from all files; '
+                    'LLM determines file mappings, modality assignments, and filename rules. '
+                    'Also generates/updates participants.tsv with complete subject list.',
+    )
     plan_parser.add_argument('--output', type=str, required=True,
-                            help='Output directory')
-    plan_parser.add_argument('--model', type=str, default='gpt-4o',
-                            help='LLM model (OpenAI or Qwen)')
+                             help='Output directory')
+    plan_parser.add_argument('--model',  type=str, default='gpt-4o',
+                             help='LLM model (default: gpt-4o)')
     plan_parser.add_argument('--id-strategy', type=str,
-                            choices=['auto', 'numeric', 'semantic'],
-                            default='auto',
-                            help='Subject ID strategy')
-    
-    # Execute command
-    execute_parser = subparsers.add_parser('execute', help='Execute conversions')
+                             choices=['auto', 'numeric', 'semantic'],
+                             default='auto',
+                             help='Subject ID strategy (default: auto)')
+
+    # ── execute ───────────────────────────────────────────────────────────────
+    execute_parser = subparsers.add_parser(
+        'execute',
+        help='Stage 6 — Execute conversions, output bids_compatible/',
+        description='Stage 6: Execute the BIDS conversion plan. '
+                    'Converts DICOM→NIfTI (via dcm2niix), JNIfTI→NIfTI, '
+                    '.mat/.nirs→SNIRF, and copies SNIRF/NIfTI files. '
+                    'Unprocessed files are copied verbatim to bids_compatible/derivatives/.',
+    )
     execute_parser.add_argument('--output', type=str, required=True,
-                                help='Output directory')
-    
-    # Validate command
-    validate_parser = subparsers.add_parser('validate', help='Validate BIDS dataset')
+                                help='Output directory (must contain _staging/BIDSPlan.yaml)')
+
+    # ── validate ──────────────────────────────────────────────────────────────
+    validate_parser = subparsers.add_parser(
+        'validate',
+        help='Stage 7 — Validate BIDS compliance',
+        description='Stage 7: Validate the generated BIDS dataset. '
+                    'Uses the official bids-validator (npm install -g bids-validator) '
+                    'if available, otherwise falls back to internal validation.',
+    )
     validate_parser.add_argument('--output', type=str, required=True,
-                                help='Output directory')
-    
+                                 help='Output directory (must contain bids_compatible/)')
+
     return parser
 
 

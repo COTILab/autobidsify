@@ -65,3 +65,6 @@ htmlcov/
 backups/
 *.backup
 *.bak
+
+# Misc
+bump_version.py
