@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autobidsify"
-version = "0.7.0"
+version = "0.8.0"
 description = "Automated BIDS standardization tool powered by LLM-first architecture"
 readme = "README.md"
 license = {text = "MIT"}
@@ -57,6 +57,8 @@ dependencies = [
     "openpyxl>=3.1.0",
     "requests>=2.28.0",
     "dcm2niix>=1.0.20220720",
+    "bids-validator>=1.14.0",
+    "ollama>=0.6.0",
 ]
 
 [project.optional-dependencies]

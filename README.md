@@ -149,7 +149,7 @@ outputs/my_dataset/
 
 ## Current Status
 
-**Version:** 0.7.0
+**Version:** 0.8.0
 
 **Tested datasets:**
 - Visible Human Project (flat structure, DICOM CT)

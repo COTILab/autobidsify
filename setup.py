@@ -14,7 +14,7 @@ def get_version():
         for line in init_file.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=")[1].strip().strip('"').strip("'")
-    return "0.7.0"
+    return "0.8.0"
 
 
 def get_long_description():
@@ -60,6 +60,8 @@ setup(
         "scipy>=1.7.0",
         "openpyxl>=3.1.0",
         "dcm2niix>=1.0.20220720",
+        "bids-validator>=1.14.0",
+        "ollama>=0.6.0",
     ],
     
     extras_require={
