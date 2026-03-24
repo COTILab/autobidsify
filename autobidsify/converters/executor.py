@@ -259,6 +259,15 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
         modality_label, subdir = "dwi",           "dwi"
     else:
         modality_label, subdir = None,            "anat"
+    
+    # override subdir when task entity is present
+    # BIDS rule: any task-* scan belongs in func/ unless it is nirs.
+    # Also check the path itself for a func/ directory component.
+    if subdir != "nirs":
+        if "task" in entities or "func" in path_lower:
+            subdir = "func"
+            if not modality_label:
+                modality_label = "bold"
 
     if entities or modality_label:
         parts = []
