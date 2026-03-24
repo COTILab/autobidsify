@@ -331,31 +331,28 @@ def run_bids_validator(bids_root: Path) -> Dict[str, Any]:
     py_result = _run_python_bids_validator(bids_root)
     report["python_validator"] = py_result
     if py_result.get("available"):
-        any_tier_ran = True
-    else:
-        info("  [Tier 1] bids_validator Python package not available.")
-        info("           Install with: pip install bids-validator")
+        report["npm_validator"] = {"available": False, "skipped": "Tier 1 succeeded"}
+        report["internal"]      = {"available": False, "skipped": "Tier 1 succeeded"}
+        return report
+    info("  [Tier 1] bids_validator Python package not available.")
+    info("           Install with: pip install bids-validator")
 
-    # --- Tier 2: npm bids-validator CLI ----------------------------------
+    # --- Tier 2: npm bids-validator CLI (only if Tier 1 unavailable) -----
     info("  [Tier 2] npm bids-validator (full structural validation)...")
     npm_result = _run_npm_bids_validator(bids_root)
     report["npm_validator"] = npm_result
     if npm_result.get("available"):
-        any_tier_ran = True
-    else:
-        info("  [Tier 2] npm bids-validator not found.")
-        info("           Install with: npm install -g bids-validator")
+        report["internal"] = {"available": False, "skipped": "Tier 2 succeeded"}
+        return report
+    info("  [Tier 2] npm bids-validator not found.")
+    info("           Install with: npm install -g bids-validator")
 
-    # --- Tier 3: Internal fallback (always run as baseline) ---------------
+    # --- Tier 3: Internal fallback (only if Tier 1 and Tier 2 both unavailable) ---
     info("  [Tier 3] Internal validation (required-file checks)...")
-    internal_result = _internal_bids_validation(bids_root)
-    report["internal"] = internal_result
-
-    if not any_tier_ran:
-        info("  Only internal validation was available.")
-        info("  For more thorough validation:")
-        info("    pip install bids-validator        # filename compliance")
-        info("    npm install -g bids-validator     # full structural check")
+    report["internal"] = _internal_bids_validation(bids_root)
+    info("  For more thorough validation:")
+    info("    pip install bids-validator        # filename compliance")
+    info("    npm install -g bids-validator     # full structural check")
 
     return report
 
