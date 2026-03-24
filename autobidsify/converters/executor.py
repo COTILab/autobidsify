@@ -233,6 +233,20 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
         if m:
             entities[key] = m.group(1)
 
+    # Infer task from filename keywords when no task- entity is present.
+    # This handles datasets where files are named by task content rather than
+    # BIDS convention (e.g. "2_finger_tapping.snirf", "3_walking.snirf").
+    if "task" not in entities:
+        fname_no_ext = fname_low.rsplit(".", 1)[0]
+        if any(kw in fname_no_ext for kw in ("rest", "resting")):
+            entities["task"] = "rest"
+        elif any(kw in fname_no_ext for kw in ("finger", "tapping", "fingertap")):
+            entities["task"] = "fingertapping"
+        elif "walking" in fname_no_ext or "walk" in fname_no_ext:
+            entities["task"] = "walking"
+        elif any(kw in fname_no_ext for kw in ("motor", "tap")):
+            entities["task"] = "motor"
+
     if fname_low.endswith(".snirf") or "nirs" in fname_low:
         modality_label, subdir = "nirs",          "nirs"
     elif any(k in fname_low for k in ("t1w", "t1")):
@@ -541,7 +555,12 @@ def execute_bids_plan(
                 fname_base = _normalize_filename(fp_str)
                 group_key  = f"{subj}_{scan_suffix}_{fname_base}"
             else:
-                group_key = f"{subj}_{scan_suffix}"
+                # For non-DICOM files (fNIRS SNIRF, NIfTI), include the
+                # filename base in the group key so that multiple files
+                # with the same subject+suffix but different names
+                # (e.g. different tasks) are kept as separate scan groups.
+                fname_base_nir = _normalize_filename(fp_str)
+                group_key = f"{subj}_{scan_suffix}_{fname_base_nir}"
 
             if group_key not in file_groups:
                 if is_dicom:

@@ -1,5 +1,4 @@
 # converters/planner.py
-# UNIVERSAL ID EXTRACTION: Use ALL files, not just samples
 
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -8,674 +7,455 @@ import yaml
 import re
 from datetime import datetime
 from collections import defaultdict
-from autobidsify.utils import write_json, read_json, write_yaml, info, warn, fatal, write_text
+from autobidsify.utils import write_json, read_json, write_yaml, info, warn, fatal
 from autobidsify.constants import SEVERITY_BLOCK
-from autobidsify.llm import llm_nirs_draft, llm_nirs_normalize, llm_mri_voxel_draft, llm_mri_voxel_final, llm_bids_plan
+from autobidsify.llm import llm_nirs_draft, llm_nirs_normalize, llm_bids_plan
 
-HEADERS_DRAFT = "nirs_headers_draft.json"
+HEADERS_DRAFT      = "nirs_headers_draft.json"
 HEADERS_NORMALIZED = "nirs_headers_normalized.json"
-VOXEL_DRAFT = "mri_voxel_draft.json"
-VOXEL_FINAL_PLAN = "mri_voxel_final.json"
-BIDS_PLAN = "BIDSPlan.yaml"
+BIDS_PLAN          = "BIDSPlan.yaml"
 
+# Data file extensions — used for filtering in multiple places
+_DATA_EXTS = {
+    '.snirf', '.nirs', '.mat',
+    '.dcm', '.nii', '.jnii', '.bnii', '.nii.gz',
+}
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
 
 def _parse_llm_json_response(response_text: str, step_name: str) -> Optional[Dict[str, Any]]:
-    """Parse LLM JSON response with fallback handling."""
+    """Strip markdown fences and parse JSON from LLM response."""
     if not response_text or not response_text.strip():
         warn(f"{step_name}: LLM returned empty response")
         return None
-    
+
     text = response_text.strip()
-    
     if text.startswith("```json"):
         text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
     elif text.startswith("```"):
-        lines = text.split('\n')
-        text = '\n'.join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    
+        text = "\n".join(text.split("\n")[1:])
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
         if "Extra data" in str(e):
             try:
-                decoder = json.JSONDecoder()
-                obj, idx = decoder.raw_decode(text)
+                obj, _ = json.JSONDecoder().raw_decode(text)
                 return obj
-            except:
+            except Exception:
                 pass
-        
         warn(f"{step_name}: Failed to parse JSON: {e}")
         return None
 
 
-def _extract_numeric_id_from_identifier(identifier: str) -> Optional[str]:
-    """
-    Extract numeric ID from identifier, preserving leading zeros.
-
-    Examples:
-        BZZ003  → '003'   (preserve leading zeros from original)
-        BZZ021  → '021'
-        sub-01  → '01'    (handled by already_bids, but safe here too)
-        patient001 → '001'
-
-    NOTE: We preserve the original zero-padded string, NOT int conversion.
-    """
-    numbers = re.findall(r'\d+', identifier)
-    if not numbers:
-        return None
-    # Return last numeric sequence as-is (preserving leading zeros)
-    return numbers[-1]
-
-
-def _generate_subject_id_mapping(subject_info: Dict[str, Any],
-                                 user_hints: Dict[str, Any],
-                                 id_strategy: str = "auto") -> Dict[str, Any]:
-    """
-    Generate subject ID mapping.
-
-    Key rule: ALWAYS detect already-BIDS format and override strategy.
-    sub-01 → '01'  (preserve leading zeros, never convert to int)
-    """
-    subject_records = subject_info.get("subject_records", [])
-
-    if not subject_records:
-        return {
-            "id_mapping": {},
-            "reverse_mapping": {},
-            "strategy_used": "none",
-            "metadata_columns": []
-        }
-
-    # ----------------------------------------------------------------
-    # CRITICAL: Always detect already-BIDS format first, override any strategy
-    # This handles: sub-01, sub-02, ... sub-10
-    # ----------------------------------------------------------------
-    all_already_bids = all(
-        re.match(r'^sub-\w+$', rec["original_id"], re.IGNORECASE)
-        for rec in subject_records
-    )
-
-    if all_already_bids:
-        id_strategy = "already_bids"
-        info(f"  Detected existing BIDS sub-XX format → using 'already_bids' strategy")
-
-    elif id_strategy == "auto":
-        has_site = subject_info.get("has_site_info", False)
-        all_simple = all(
-            rec["original_id"].isdigit() or len(rec["original_id"]) <= 3
-            for rec in subject_records
-        )
-        if has_site:
-            id_strategy = "semantic"
-        elif len(subject_records) <= 10 and not all_simple:
-            id_strategy = "semantic"
-        else:
-            id_strategy = "numeric"
-        info(f"  Auto-selected ID strategy: {id_strategy}")
-
-    id_mapping = {}
-    reverse_mapping = {}
-    metadata_columns = []
-
-    # ----------------------------------------------------------------
-    # already_bids: sub-01 → '01', sub-10 → '10'
-    # Strip 'sub-' prefix, preserve leading zeros exactly as-is
-    # ----------------------------------------------------------------
-    if id_strategy == "already_bids":
-        for rec in subject_records:
-            original_id = rec["original_id"]
-            # Strip 'sub-' prefix only, keep the rest verbatim
-            bids_id = re.sub(r'^sub-', '', original_id)   # 'sub-01' → '01'
-            id_mapping[original_id] = bids_id
-            reverse_mapping[bids_id] = original_id
-        metadata_columns = []
-
-    # ----------------------------------------------------------------
-    # numeric: extract trailing numbers, preserve leading zeros
-    # BZZ003 → '003', patient021 → '021'
-    # ----------------------------------------------------------------
-    elif id_strategy == "numeric":
-        extracted_numbers = {}
-        for rec in subject_records:
-            original_id = rec["original_id"]
-            numeric_id = _extract_numeric_id_from_identifier(original_id)
-            if numeric_id:
-                extracted_numbers[original_id] = numeric_id
-
-        if extracted_numbers and len(set(extracted_numbers.values())) == len(extracted_numbers):
-            info(f"  ✓ Using extracted numeric IDs (with original zero-padding)")
-            for original_id, numeric_id in extracted_numbers.items():
-                id_mapping[original_id] = numeric_id
-                reverse_mapping[numeric_id] = original_id
-        else:
-            info(f"  → Using sequential numbering (extracted IDs not unique)")
-            for i, rec in enumerate(subject_records, 1):
-                original_id = rec["original_id"]
-                bids_id = str(i)
-                id_mapping[original_id] = bids_id
-                reverse_mapping[bids_id] = original_id
-
-        metadata_columns = ["original_id"]
-        if subject_info.get("has_site_info"):
-            metadata_columns.append("site")
-
-    # ----------------------------------------------------------------
-    # semantic: remove special chars, preserve full identifier
-    # NewYork_sub04856 → 'NewYorksub04856'
-    # ----------------------------------------------------------------
-    elif id_strategy == "semantic":
-        for rec in subject_records:
-            original_id = rec["original_id"]
-            bids_id = re.sub(r'[^a-zA-Z0-9]', '', original_id)
-            id_mapping[original_id] = bids_id
-            reverse_mapping[bids_id] = original_id
-        metadata_columns = []
-        if subject_info.get("has_site_info"):
-            metadata_columns.append("site")
-
-    return {
-        "id_mapping": id_mapping,
-        "reverse_mapping": reverse_mapping,
-        "strategy_used": id_strategy,
-        "metadata_columns": metadata_columns
-    }
+def _is_data_file(path: str) -> bool:
+    """Return True if path has a recognised neuroimaging extension."""
+    low = path.lower()
+    if low.endswith('.nii.gz'):
+        return True
+    ext = ('.' + low.rsplit('.', 1)[-1]) if '.' in low else ''
+    return ext in _DATA_EXTS
 
 
 def _extract_subjects_from_directory_structure(all_files: List[str]) -> Dict[str, Any]:
-    """Extract subjects from directory structure."""
+    """
+    Detect subjects from top-level directory names.
+    Supports: site_sub-NN, sub-NN, subject-NN, pure-numeric dirs.
+    """
     patterns = [
-        (r'([A-Za-z]+)_sub(\d+)', True, 2, 1, "site_prefixed"),
-        (r'sub-(\d+)', False, 1, None, "standard_bids"),
-        (r'subject[_-]?(\d+)', False, 1, None, "simple"),
-        (r'^(\d{3,})$', False, 1, None, "numeric_only"),
+        (r'([A-Za-z]+)_sub(\d+)', True,  2, 1, "site_prefixed"),
+        (r'sub-(\w+)',             False, 1, None, "standard_bids"),
+        (r'subject[_-]?(\d+)',    False, 1, None, "simple"),
+        (r'^(\d{3,})$',           False, 1, None, "numeric_only"),
     ]
-    
-    subject_records = []
-    seen_ids = set()
-    
+
+    subject_records: List[Dict] = []
+    seen_ids: set = set()
+
     for filepath in all_files:
         parts = filepath.split('/')
-        
         for part in parts[:2]:
-            for pattern_regex, has_site, id_group, site_group, pattern_name in patterns:
-                match = re.match(pattern_regex, part, re.IGNORECASE)
-                if match:
-                    numeric_id = match.group(id_group)
-                    original_id = match.group(0)
-                    
+            for regex, has_site, id_grp, site_grp, pname in patterns:
+                m = re.match(regex, part, re.IGNORECASE)
+                if m:
+                    original_id = m.group(0)
                     if original_id in seen_ids:
                         break
-                    
                     seen_ids.add(original_id)
-                    
-                    site = match.group(site_group) if has_site and site_group else None
-                    
                     subject_records.append({
                         "original_id": original_id,
-                        "numeric_id": numeric_id,
-                        "site": site,
-                        "pattern_name": pattern_name
+                        "numeric_id":  m.group(id_grp),
+                        "site":        m.group(site_grp) if has_site and site_grp else None,
+                        "pattern_name": pname,
                     })
                     break
-    
-    if len(subject_records) == 0:
+
+    if not subject_records:
         return {"success": False, "method": "directory_structure"}
-    
-    subject_records.sort(key=lambda x: int(x["numeric_id"]) if x["numeric_id"].isdigit() else 0)
-    has_sites = any(rec["site"] is not None for rec in subject_records)
-    
+
+    subject_records.sort(
+        key=lambda x: int(x["numeric_id"]) if x["numeric_id"].isdigit() else 0
+    )
     return {
-        "success": True,
-        "method": "directory_structure",
+        "success":       True,
+        "method":        "directory_structure",
         "subject_records": subject_records,
         "subject_count": len(subject_records),
-        "has_site_info": has_sites
+        "has_site_info": any(r["site"] for r in subject_records),
     }
 
 
-def _extract_subjects_from_flat_filenames(all_files: List[str], 
-                                          filename_analysis: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_subjects_from_flat_filenames(all_files: List[str]) -> Dict[str, Any]:
     """
-    Extract subjects from flat structure - UNIVERSAL VERSION.
-    
-    CRITICAL: Use ALL files, not just samples!
-    
-    Strategy:
-    1. Extract base identifier from every filename
-    2. Group by unique identifiers
-    3. Sort by extracted numeric ID if present
+    Detect subjects from data-file filename prefixes.
+    Only processes files with recognised neuroimaging extensions.
     """
-    identifier_to_files = defaultdict(list)
-    
-    # CRITICAL: Use ALL files, not just samples
+    identifier_to_files: Dict[str, List[str]] = defaultdict(list)
+
     for filepath in all_files:
         filename = filepath.split('/')[-1]
-        name_no_ext = filename.rsplit('.', 1)[0]
-        
-        # Extract base identifier (alphanumeric before first underscore or complete)
-        # Examples: BZZ003 → BZZ003, patient001_rest → patient001
-        base_id_match = re.match(r'^([A-Za-z0-9\-]+)', name_no_ext)
-        
-        if base_id_match:
-            identifier = base_id_match.group(1)
-            identifier_to_files[identifier].append(filepath)
-    
+        low = filename.lower()
+
+        # Extension check
+        if low.endswith('.nii.gz'):
+            ext = '.nii.gz'
+        else:
+            ext = ('.' + low.rsplit('.', 1)[-1]) if '.' in low else ''
+        if ext not in _DATA_EXTS:
+            continue
+
+        # Strip extension(s)
+        name_no_ext = filename
+        if name_no_ext.lower().endswith('.nii.gz'):
+            name_no_ext = name_no_ext[:-7]
+        elif '.' in name_no_ext:
+            name_no_ext = name_no_ext.rsplit('.', 1)[0]
+
+        m = re.match(r'^([A-Za-z0-9\-]+)', name_no_ext)
+        if m:
+            identifier_to_files[m.group(1)].append(filepath)
+
     if not identifier_to_files:
         return {"success": False, "method": "flat_filename"}
-    
-    # Sort identifiers by extracted numeric ID if possible
-    def sort_key(identifier):
-        numeric_id = _extract_numeric_id_from_identifier(identifier)
-        return int(numeric_id) if numeric_id else 999999
-    
-    sorted_identifiers = sorted(identifier_to_files.keys(), key=sort_key)
-    
-    # Generate subject records
-    subject_records = []
-    for i, identifier in enumerate(sorted_identifiers, 1):
-        files = identifier_to_files[identifier]
-        
-        subject_records.append({
-            "original_id": identifier,
-            "numeric_id": str(i),  # Sequential for now (will be updated by ID mapping)
-            "site": None,
+
+    def _sort_key(ident: str) -> int:
+        nums = re.findall(r'\d+', ident)
+        return int(nums[-1]) if nums else 999999
+
+    sorted_ids = sorted(identifier_to_files.keys(), key=_sort_key)
+    subject_records = [
+        {
+            "original_id":  ident,
+            "numeric_id":   str(i),
+            "site":         None,
             "pattern_name": "filename_identifier",
-            "file_count": len(files)
-        })
-    
+            "file_count":   len(identifier_to_files[ident]),
+        }
+        for i, ident in enumerate(sorted_ids, 1)
+    ]
+
     info(f"  Detected {len(subject_records)} unique identifiers:")
     for rec in subject_records[:10]:
         info(f"    '{rec['original_id']}': {rec['file_count']} file(s)")
     if len(subject_records) > 10:
         info(f"    ... and {len(subject_records) - 10} more")
-    
+
     return {
-        "success": True,
-        "method": "flat_filename_identifiers",
+        "success":         True,
+        "method":          "flat_filename_identifiers",
         "subject_records": subject_records,
-        "subject_count": len(subject_records),
-        "has_site_info": False,
-        "variants_by_subject": {},
-        "python_generated_filename_rules": []
+        "subject_count":   len(subject_records),
+        "has_site_info":   False,
     }
 
 
-def _merge_participants_with_metadata(plan: Dict[str, Any],
-                                       out_dir: Path,
-                                       subject_info: Dict[str, Any],
-                                       id_mapping_info: Dict[str, Any]) -> None:
-    """
-    Merge LLM participant_metadata into Python-generated participants.tsv.
-    
-    Design:
-    - Python subject list is the authoritative source (always complete)
-    - LLM metadata provides ADDITIONAL columns only (age, sex, group, etc.)
-    - Missing values filled with 'n/a'
-    - Never reduces row count below Python's subject count
-    """
-    participants_path = out_dir / 'participants.tsv'
-    participant_metadata = plan.get('participant_metadata', {})
-    subject_records = subject_info.get('subject_records', [])
-    id_mapping = id_mapping_info.get('id_mapping', {})
-    metadata_columns = id_mapping_info.get('metadata_columns', [])
-
-    if not participant_metadata:
-        return
-
-    # Collect extra columns from LLM metadata
-    # (exclude columns Python already handles: original_id, site)
-    python_columns = set(metadata_columns) | {'original_id', 'site'}
-    extra_columns = []
-    for meta in participant_metadata.values():
+def _collect_extra_columns(metadata: Dict[str, Any]) -> List[str]:
+    """Return deduplicated extra column names from participant_metadata."""
+    seen: set = set()
+    cols: List[str] = []
+    for meta in metadata.values():
         for col in meta.keys():
-            if col not in python_columns and col not in extra_columns:
-                extra_columns.append(col)
+            if col not in seen and col != "participant_id":
+                seen.add(col)
+                cols.append(col)
+    return cols
 
-    if not extra_columns:
-        info("  ✓ No additional columns from LLM metadata")
+
+def _write_participants_from_plan(
+    plan_yaml: Dict[str, Any],
+    out_dir: Path,
+    user_n_subjects: Optional[int],
+) -> None:
+    """
+    Write participants.tsv from LLM assignment_rules.
+    LLM rules are authoritative; warn if count < user expectation.
+    """
+    parts_path = out_dir / "participants.tsv"
+    if parts_path.exists():
+        parts_path.unlink()
+
+    rules  = plan_yaml.get("assignment_rules", [])
+    labels = plan_yaml.get("subjects", {}).get("labels", [])
+
+    seen:    set       = set()
+    ordered: List[str] = []
+    for rule in rules:
+        sid = str(rule.get("subject", ""))
+        if sid and sid not in seen:
+            seen.add(sid)
+            ordered.append(sid)
+
+    if not ordered:
+        ordered = [str(lbl) for lbl in labels]
+
+    if user_n_subjects and len(ordered) < user_n_subjects:
+        warn(f"  ⚠ participants.tsv has {len(ordered)} subjects "
+             f"but user specified {user_n_subjects}. "
+             f"LLM assignment_rules may be incomplete — check BIDSPlan.yaml.")
+
+    metadata      = plan_yaml.get("participant_metadata", {})
+    extra_columns = _collect_extra_columns(metadata)
+    columns       = ["participant_id"] + extra_columns
+
+    def _sort_key(sid: str):
+        try:    return (0, int(sid))
+        except: return (1, sid)
+
+    lines = ["\t".join(columns) + "\n"]
+    for sid in sorted(ordered, key=_sort_key):
+        meta = metadata.get(sid, {})
+        row  = [f"sub-{sid}"] + [str(meta.get(col, "n/a")) for col in extra_columns]
+        lines.append("\t".join(row) + "\n")
+
+    parts_path.write_text("".join(lines))
+    info(f"  ✓ participants.tsv: {len(ordered)} subjects, columns: {columns}")
+
+
+def _merge_participants_from_llm_metadata(
+    plan_yaml: Dict[str, Any],
+    out_dir: Path,
+) -> None:
+    """Append any extra columns from participant_metadata to existing participants.tsv."""
+    parts_path = out_dir / "participants.tsv"
+    if not parts_path.exists():
         return
 
-    info(f"  Merging LLM metadata columns: {extra_columns}")
+    metadata      = plan_yaml.get("participant_metadata", {})
+    extra_columns = _collect_extra_columns(metadata)
+    if not extra_columns:
+        info("  No extra columns from LLM metadata")
+        return
 
-    # Build base columns (same as _generate_participants_tsv_from_python)
-    columns = ['participant_id']
-    if 'original_id' in metadata_columns:
-        columns.append('original_id')
-    if 'site' in metadata_columns:
-        columns.append('site')
-    columns.extend(extra_columns)
+    existing = parts_path.read_text().splitlines()
+    if not existing:
+        return
 
-    lines = ['\t'.join(columns) + '\n']
+    header   = existing[0].split("\t")
+    new_cols = [c for c in extra_columns if c not in header]
+    if not new_cols:
+        info("  participants.tsv already has all metadata columns")
+        return
 
-    # Safe sort
-    def _safe_sort_key(rec):
-        bids_id = id_mapping.get(rec['original_id'], rec.get('numeric_id', '0'))
-        try:
-            return (0, int(bids_id))
-        except (ValueError, TypeError):
-            return (1, str(bids_id))
+    info(f"  Adding columns to participants.tsv: {new_cols}")
+    new_lines = ["\t".join(header + new_cols)]
+    for line in existing[1:]:
+        if not line.strip():
+            continue
+        cells = line.split("\t")
+        sid   = cells[0].replace("sub-", "")
+        meta  = metadata.get(sid, {})
+        new_lines.append("\t".join(cells + [str(meta.get(c, "n/a")) for c in new_cols]))
 
-    sorted_records = sorted(subject_records, key=_safe_sort_key)
-
-    for rec in sorted_records:
-        original_id = rec['original_id']
-        bids_id = id_mapping.get(original_id, rec.get('numeric_id', '?'))
-        llm_meta = participant_metadata.get(bids_id, {})
-
-        row = [f"sub-{bids_id}"]
-        if 'original_id' in columns:
-            row.append(original_id)
-        if 'site' in columns:
-            row.append(rec.get('site', 'n/a'))
-        for col in extra_columns:
-            row.append(str(llm_meta.get(col, 'n/a')))
-
-        lines.append('\t'.join(row) + '\n')
-
-    participants_path.write_text(''.join(lines))
-    info(f"  ✓ Merged participants.tsv: {len(sorted_records)} subjects, "
-         f"added columns: {extra_columns}")
+    parts_path.write_text("\n".join(new_lines) + "\n")
+    info(f"  ✓ participants.tsv updated with {len(new_cols)} new column(s)")
 
 
-def _generate_participants_tsv_from_python(subject_info: Dict[str, Any],
-                                            out_dir: Path,
-                                            id_mapping: Dict[str, str],
-                                            metadata_columns: List[str]) -> None:
-    """Generate participants.tsv. Always regenerate to avoid stale data."""
-    participants_path = out_dir / 'participants.tsv'
+# ============================================================================
+# Main entry point
+# ============================================================================
 
-    if participants_path.exists():
-        info("  Removing old participants.tsv to regenerate")
-        participants_path.unlink()
+def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
+                    out_dir: Path, id_strategy: str = "auto") -> Dict[str, Any]:
+    """
+    Build BIDS conversion plan (LLM-first, Python-validates).
 
-    subject_records = subject_info.get("subject_records", [])
-
-    columns = ['participant_id']
-    if 'original_id' in metadata_columns:
-        columns.append('original_id')
-    if 'site' in metadata_columns:
-        columns.append('site')
-
-    lines = ['\t'.join(columns) + '\n']
-
-    # Safe sort: try numeric first, fallback to string
-    def _safe_sort_key(rec):
-        bids_id = id_mapping.get(rec['original_id'], rec.get('numeric_id', '0'))
-        try:
-            return (0, int(bids_id))
-        except (ValueError, TypeError):
-            return (1, str(bids_id))
-
-    sorted_records = sorted(subject_records, key=_safe_sort_key)
-
-    for rec in sorted_records:
-        original_id = rec['original_id']
-        bids_id = id_mapping.get(original_id, rec.get('numeric_id', '?'))
-
-        row = [f"sub-{bids_id}"]
-        if 'original_id' in columns:
-            row.append(original_id)
-        if 'site' in columns:
-            row.append(rec.get('site', 'unknown'))
-
-        lines.append('\t'.join(row) + '\n')
-
-    participants_path.write_text(''.join(lines))
-
-    all_bids_ids = [id_mapping.get(r['original_id'], '?') for r in sorted_records]
-    info(f"  ✓ Generated participants.tsv ({len(sorted_records)} subjects)")
-    info(f"    BIDS IDs: {all_bids_ids[:5]}{'...' if len(all_bids_ids) > 5 else ''}")
-
-
-def _apply_python_rules_to_plan(plan_yaml: Dict[str, Any], 
-                                subject_info: Dict[str, Any],
-                                id_mapping_info: Dict[str, Any]) -> None:
-    """Apply Python's subject detection."""
-    subject_records = subject_info.get("subject_records", [])
-    id_mapping = id_mapping_info.get('id_mapping', {})
-    
-    subject_labels = [
-        id_mapping.get(rec["original_id"], rec["numeric_id"])
-        for rec in subject_records
-    ]
-    
-    plan_yaml['subjects'] = {
-        'labels': subject_labels,
-        'count': len(subject_labels),
-        'source': 'python_extracted',
-        'id_strategy': id_mapping_info.get('strategy_used')
-    }
-    
-    plan_yaml['assignment_rules'] = []
-    for rec in subject_records:
-        original_id = rec["original_id"]
-        bids_id = id_mapping.get(original_id, rec["numeric_id"])
-        
-        plan_yaml['assignment_rules'].append({
-            'subject': bids_id,
-            'original': original_id,
-            'match': [f"*{original_id}*"]
-        })
-    
-    info(f"  → Applied {len(subject_labels)} subjects")
-
-
-def _enhance_plan_with_python_details(plan_yaml: Dict[str, Any], 
-                                      subject_info: Dict[str, Any],
-                                      id_mapping_info: Dict[str, Any]) -> None:
-    """Enhance LLM plan with Python analysis."""
-    if 'assignment_rules' not in plan_yaml or not plan_yaml['assignment_rules']:
-        _apply_python_rules_to_plan(plan_yaml, subject_info, id_mapping_info)
-
-
-def build_bids_plan(model: str, planning_inputs: Dict[str, Any], 
-                   out_dir: Path, id_strategy: str = "auto") -> Dict[str, Any]:
-    """Build BIDS plan."""
+    Steps:
+      1. Python extracts subject hints from directory/filename structure (advisory).
+      2. Build LLM payload — data files only, non-data files filtered out.
+      3. Call LLM to generate full BIDSPlan (assignment_rules, mappings, metadata).
+      4. Validate subject count: trust LLM rules, only update count field if needed.
+      5. Write participants.tsv from LLM plan.
+      6. Merge any extra metadata columns from LLM.
+      7. Save BIDSPlan.yaml.
+    """
     info("=== Generating Unified BIDS Plan ===")
-    
+
     evidence_bundle = planning_inputs.get("evidence_bundle", {})
-    all_files = evidence_bundle.get("all_files", [])
-    
-    staging_dir = out_dir / '_staging'
+    all_files       = evidence_bundle.get("all_files", [])
+    user_hints      = evidence_bundle.get("user_hints", {})
+    user_n_subjects = user_hints.get("n_subjects")
+
+    staging_dir = out_dir / "_staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
-    
-    info("Step 1: Python extracting subjects from ALL files...")
-    
+
+    # ── Step 1: Python structural hints (advisory only) ───────────────
+    info("Step 1: Python extracting structural hints...")
     subject_info = _extract_subjects_from_directory_structure(all_files)
-    
     if not subject_info["success"]:
-        info("  Trying flat filename analysis on ALL files...")
-        subject_info = _extract_subjects_from_flat_filenames(all_files, {})
+        info("  Directory-level detection failed, trying flat filename analysis...")
+        subject_info = _extract_subjects_from_flat_filenames(all_files)
 
     python_subject_count = subject_info.get("subject_count", 0)
+    info(f"  Python hint: {python_subject_count} subjects "
+         f"(method: {subject_info.get('method', 'unknown')})")
 
-    if subject_info["success"]:
-        info(f"  ✓ Extracted {python_subject_count} subjects")
+    # ── Step 2: Build LLM payload (data files only) ───────────────────
+    info("\nStep 2: Building LLM payload...")
+    data_files = [f for f in all_files if _is_data_file(f)]
 
-    # ----------------------------------------------------------------
-    # CRITICAL: Validate extracted count against user_n_subjects
-    # If flat filename extraction is too fine-grained (e.g. VHM/VHF body
-    # parts detected as separate subjects), fall back to dominant_prefixes
-    # from filename_tokenizer which operates at token level.
-    # ----------------------------------------------------------------
-    user_n_subjects = evidence_bundle.get("user_hints", {}).get("n_subjects")
-    filename_analysis = evidence_bundle.get("filename_analysis", {})
-    dominant_prefixes = filename_analysis.get("python_statistics", {}).get("dominant_prefixes", [])
+    if len(data_files) <= 200:
+        sample_files = data_files
+    else:
+        n       = len(data_files)
+        indices = (list(range(0, min(50, n))) +
+                   list(range(n // 2 - 25, n // 2 + 25)) +
+                   list(range(max(0, n - 50), n)))
+        sample_files = [data_files[i] for i in sorted(set(indices)) if i < n]
 
-    if (user_n_subjects
-            and python_subject_count != user_n_subjects
-            and len(dominant_prefixes) == user_n_subjects):
+    info(f"  Data files for LLM: {len(sample_files)} "
+         f"(filtered from {len(all_files)} total)")
 
-        info(f"  ⚠ Extracted {python_subject_count} subjects but user specified {user_n_subjects}")
-        info(f"  → Falling back to filename token dominant prefixes: "
-             f"{[p['prefix'] for p in dominant_prefixes]}")
-
-        subject_records = []
-        for i, prefix_info in enumerate(dominant_prefixes, 1):
-            subject_records.append({
-                "original_id": prefix_info["prefix"],
-                "numeric_id": str(i),
-                "site": None,
-                "pattern_name": "dominant_prefix",
-                "file_count": prefix_info["count"]
-            })
-
-        subject_info = {
-            "success": True,
-            "method": "dominant_prefix_fallback",
-            "subject_records": subject_records,
-            "subject_count": len(subject_records),
-            "has_site_info": False,
-            "variants_by_subject": {},
-            "python_generated_filename_rules": []
-        }
-        python_subject_count = len(subject_records)
-        info(f"  ✓ Using {python_subject_count} dominant prefixes as subjects")
-        for rec in subject_records:
-            info(f"    '{rec['original_id']}': {rec['file_count']} file(s)")
-    
-    info("\nStep 1.5: Generating ID mapping...")
-    id_mapping_info = _generate_subject_id_mapping(
-        subject_info, 
-        evidence_bundle.get("user_hints", {}), 
-        id_strategy
-    )
-    
-    info(f"  Strategy: {id_mapping_info['strategy_used']}")
-    if id_mapping_info['id_mapping']:
-        sample_mappings = list(id_mapping_info['id_mapping'].items())[:10]
-        info(f"  ID Mappings:")
-        for orig, bids in sample_mappings:
-            info(f"    '{orig}' → sub-{bids}")
-        if len(id_mapping_info['id_mapping']) > 10:
-            info(f"    ... and {len(id_mapping_info['id_mapping']) - 10} more")
-    
-    subject_analysis_path = staging_dir / 'subject_analysis.json'
-    subject_info['id_mapping'] = id_mapping_info
-    write_json(subject_analysis_path, subject_info)
-    
-    info("\nStep 2: Generating participants.tsv...")
-    
-    if subject_info["success"]:
-        _generate_participants_tsv_from_python(
-            subject_info,
-            out_dir,
-            id_mapping_info['id_mapping'],
-            id_mapping_info['metadata_columns']
-        )
-    
-    info("\nStep 3: Calling LLM...")
-    
     optimized_bundle = {
-        "root": evidence_bundle.get("root"),
-        "counts_by_ext": evidence_bundle.get("counts_by_ext", {}),
-        "user_hints": evidence_bundle.get("user_hints", {}),
-        "file_count": len(all_files),
-        "sample_files": [s['relpath'] for s in evidence_bundle.get('samples', [])],
+        "root":          evidence_bundle.get("root"),
+        "counts_by_ext": {
+            k: v for k, v in evidence_bundle.get("counts_by_ext", {}).items()
+            if k.lower() in _DATA_EXTS
+        },
+        "user_hints":    user_hints,
+        "total_files":   len(all_files),
+        "data_files":    len(data_files),
+        "sample_files":  sample_files,
         "python_subject_analysis": {
-            "success": subject_info["success"],
-            "method": subject_info.get("method"),
+            "success":       subject_info["success"],
+            "method":        subject_info.get("method"),
             "subject_count": python_subject_count,
             "subject_examples": [
-                {"original": rec["original_id"], "bids_id": id_mapping_info['id_mapping'].get(rec["original_id"])}
-                for rec in subject_info.get("subject_records", [])[:10]
+                {
+                    "original":   rec["original_id"],
+                    "numeric_id": rec.get("numeric_id"),
+                    "site":       rec.get("site"),
+                }
+                for rec in subject_info.get("subject_records", [])[:20]
             ],
-            "id_mapping": id_mapping_info
-        }
+            "note": (
+                "This is a HINT from Python's heuristic detection. "
+                "Trust user_hints.n_subjects over this count. "
+                "Use your own analysis of sample_files to determine "
+                "the true subject structure."
+            ),
+        },
     }
-    
+
+    # ── Step 3: Call LLM ──────────────────────────────────────────────
+    info("\nStep 3: Calling LLM for full plan generation...")
     evidence_json = json.dumps(optimized_bundle, indent=2)
     plan_response = llm_bids_plan(model, evidence_json)
-    
+
     if not plan_response:
-        fatal("LLM failed")
-    
+        fatal("LLM returned empty response for BIDS plan")
+
     try:
         text = plan_response.strip()
         if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
+            text = "\n".join(text.split("\n")[1:])
         if text.endswith("```"):
             text = text[:-3]
         plan_yaml = yaml.safe_load(text.strip())
     except yaml.YAMLError as e:
-        fatal(f"YAML error: {e}")
-    
-    info("\nStep 4: Validating...")
-    
-    llm_count = plan_yaml.get('subjects', {}).get('count', 0)
-    user_count = evidence_bundle.get("user_hints", {}).get("n_subjects")
-    
-    info(f"  LLM: {llm_count}, Python: {python_subject_count}, User: {user_count}")
-    
-    # Use Python's analysis (most reliable for flat structures)
-    if python_subject_count > 0:
-        info("  → Using Python's complete file analysis")
-        _apply_python_rules_to_plan(plan_yaml, subject_info, id_mapping_info)
-    
-    plan_yaml['metadata'] = {
-        'generated_at': datetime.now().isoformat(),
-        'model': model,
-        'id_strategy': id_mapping_info.get('strategy_used')
+        fatal(f"BIDS plan YAML parsing failed: {e}")
+
+    if not isinstance(plan_yaml, dict):
+        fatal("BIDS plan is not a valid YAML dict")
+
+    # ── Step 4: Validate subject count ────────────────────────────────
+    info("\nStep 4: Validating subject count...")
+    llm_count = plan_yaml.get("subjects", {}).get("count", 0)
+    info(f"  LLM produced:  {llm_count} subjects")
+    info(f"  User provided: {user_n_subjects} subjects (--nsubjects)")
+
+    if user_n_subjects and llm_count != user_n_subjects:
+        warn(f"  ⚠ LLM subject count ({llm_count}) ≠ user-provided count "
+             f"({user_n_subjects}). Trusting LLM assignment_rules; updating count only.")
+        plan_yaml["subjects"]["count"] = user_n_subjects
+
+    # ── Step 5: Write participants.tsv ────────────────────────────────
+    info("\nStep 5: Generating participants.tsv from LLM plan...")
+    _write_participants_from_plan(plan_yaml, out_dir, user_n_subjects)
+
+    # ── Step 6: Merge extra metadata columns ──────────────────────────
+    info("\nStep 6: Merging participant metadata...")
+    if "participant_metadata" in plan_yaml:
+        _merge_participants_from_llm_metadata(plan_yaml, out_dir)
+
+    # ── Step 7: Save plan ─────────────────────────────────────────────
+    plan_yaml["metadata"] = {
+        "generated_at": datetime.now().isoformat(),
+        "model":        model,
+        "id_strategy":  id_strategy,
     }
-    
     plan_path = staging_dir / BIDS_PLAN
     write_yaml(plan_path, plan_yaml)
     info(f"\n✓ Plan saved: {plan_path}")
-    
-    info("\nStep 5: Updating participants.tsv...")
-    if 'participant_metadata' in plan_yaml:
-        _merge_participants_with_metadata(
-            plan_yaml, out_dir, 
-            subject_info, id_mapping_info
-    )
-    
-    info(f"\n=== Complete: {plan_yaml.get('subjects', {}).get('count', 0)} subjects ===")
-    
+
+    final_count = plan_yaml.get("subjects", {}).get("count", llm_count)
+    info(f"\n=== Complete: {final_count} subjects ===")
     return {"status": "ok", "warnings": [], "questions": []}
 
 
-def nirs_plan_headers(model: str, planning_inputs: Dict[str, Any], 
-                     out_dir: Path) -> Dict[str, Any]:
-    """NIRS header planning."""
+# ============================================================================
+# NIRS header planning (separate from main BIDS plan)
+# ============================================================================
+
+def nirs_plan_headers(model: str, planning_inputs: Dict[str, Any],
+                      out_dir: Path) -> Dict[str, Any]:
+    """Plan fNIRS header mappings via two-step LLM draft/normalize."""
     info("=== Planning NIRS headers ===")
-    
+
     evidence_bundle = planning_inputs.get("evidence_bundle", {})
-    evidence_json = json.dumps(evidence_bundle, indent=2)
-    
+    evidence_json   = json.dumps(evidence_bundle, indent=2)
+
     draft_response = llm_nirs_draft(model, evidence_json)
     if not draft_response:
         return {"warnings": [], "questions": []}
-    
+
     draft = _parse_llm_json_response(draft_response, "nirs_draft")
     if not draft:
         return {"warnings": [], "questions": []}
-    
+
     staging_dir = out_dir / "_staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
     write_json(staging_dir / HEADERS_DRAFT, draft)
-    
+
     normalized_response = llm_nirs_normalize(model, json.dumps(draft, indent=2))
     if not normalized_response:
         return {"warnings": [], "questions": []}
-    
+
     normalized = _parse_llm_json_response(normalized_response, "nirs_normalize")
     if not normalized:
         return {"warnings": [], "questions": []}
-    
+
     write_json(staging_dir / HEADERS_NORMALIZED, normalized)
-    info(f"✓ NIRS headers saved")
-    
+    info("✓ NIRS headers saved")
     return {"warnings": [], "questions": []}
 
 
 def mri_plan_voxel_mappings(model: str, planning_inputs: Dict[str, Any],
-                           out_dir: Path) -> Dict[str, Any]:
-    """MRI voxel mapping planning."""
+                             out_dir: Path) -> Dict[str, Any]:
+    """MRI voxel mapping planning (stub)."""
     return {"warnings": [], "questions": []}

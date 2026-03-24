@@ -8,10 +8,6 @@ import argparse
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.resolve()
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 from autobidsify.stages.ingest import ingest_data
 from autobidsify.stages.evidence import build_evidence_bundle
 from autobidsify.stages.classification import classify_files

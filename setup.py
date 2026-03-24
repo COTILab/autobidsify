@@ -14,7 +14,7 @@ def get_version():
         for line in init_file.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=")[1].strip().strip('"').strip("'")
-    return "0.8.0"
+    return "0.8.5"
 
 
 def get_long_description():

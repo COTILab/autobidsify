@@ -582,43 +582,115 @@ Output JSON (ONLY valid JSON):
 PROMPT_BIDS_PLAN = """You are a BIDS dataset architect with complete decision-making authority.
 
 ═══════════════════════════════════════════════════════════════════════
-SUPPORTED FORMATS AND CONVERSION RULES (v10 - CRITICAL)
+SUPPORTED FORMATS AND CONVERSION RULES
 ═══════════════════════════════════════════════════════════════════════
 
 MRI FORMATS (modality: mri):
-  Input formats:
-    • DICOM (.dcm)           → Convert to NIfTI using dcm2niix
-    • NIfTI (.nii, .nii.gz)  → Already BIDS-ready, copy directly
-    • JNIfTI (.jnii, .bnii)  → Convert to NIfTI using jnifti_converter
-
-  BIDS output: .nii.gz files only
+  • DICOM (.dcm)           → convert_to: nifti   (dcm2niix)
+  • NIfTI (.nii, .nii.gz)  → format_ready: true  (copy directly)
+  • JNIfTI (.jnii, .bnii)  → convert_to: nifti
 
 fNIRS FORMATS (modality: nirs):
-  Input formats:
-    • SNIRF (.snirf)         → Already BIDS-ready, copy directly
-    • Homer3 (.nirs)         → Convert to SNIRF
-    • MATLAB (.mat)          → Convert to SNIRF
-
-  BIDS output: .snirf files only
+  • SNIRF (.snirf)         → format_ready: true  (copy directly)
+  • Homer3 (.nirs)         → convert_to: snirf
+  • MATLAB (.mat)          → convert_to: snirf
 
 ═══════════════════════════════════════════════════════════════════════
-CRITICAL RULES FOR .mat FILES
+SUBJECT IDENTIFICATION — MOST IMPORTANT STEP
 ═══════════════════════════════════════════════════════════════════════
 
-.mat files are AMBIGUOUS - they can contain EITHER MRI or fNIRS data!
+Your first job is to correctly identify all subjects from the file list.
+The dataset may use ANY of the following structures:
 
-Decision logic:
-1. Check user_hints.modality_hint:
-   - If "nirs" → treat as fNIRS, set convert_to: "snirf"
-   - If "mri" → treat as MRI voxel data (rare, needs special handling)
+STRUCTURE 1 — Already BIDS (sub-XX directories)
+  sub-01/nirs/sub-01_task-rest_nirs.snirf
+  sub-02/nirs/sub-02_task-rest_nirs.snirf
+  → Use 'already_bids' strategy. Strip 'sub-' prefix.
 
-2. Check user_hints.user_text for keywords:
-   - Keywords indicating fNIRS: "fNIRS", "NIRS", "optodes", "channels", "oxygenation"
-   - Keywords indicating MRI: "MRI", "anatomical", "voxels", "brain volume"
+STRUCTURE 2 — Site-prefixed directories
+  Beijing_sub82352/anat/scan.nii.gz
+  Newark_sub41006/anat/scan.nii.gz
+  → Use directory names as subject identifiers.
 
-3. Default assumption:
-   - If modality_hint = "nirs" → .mat is fNIRS data
-   - Otherwise → ask user for clarification
+STRUCTURE 3 — Flat files with numeric suffix
+  VHMCT1mm-Hip (134).dcm  (prefix VHM = subject 1)
+  VHFCT1mm-Hip (45).dcm   (prefix VHF = subject 2)
+  → Use filename prefix as subject identifier.
+
+STRUCTURE 4 — Group/subject nested directories
+  PD/PD_01.snirf
+  PD/PD_02.snirf
+  control/control_01.snirf
+  control/control_20.snirf
+  → Each unique filename base (PD_01, PD_02 ... control_01 ... control_20)
+    is ONE subject. The parent directory (PD / control) is the GROUP,
+    not the subject. Add 'group' column to participant_metadata.
+  → Assign numeric IDs: PD_01→1, PD_02→2 ... control_01→21 ... control_20→40
+
+STRUCTURE 5 — Task/group/subject nested directories
+  walking/PD/PD_01.snirf
+  walking/control/control_01.snirf
+  → Same as Structure 4. Ignore the task-level directory when identifying subjects.
+    The task name goes into the BIDS filename (task-walking), not the subject ID.
+
+STRUCTURE 6 — Pure numeric directories
+  001/scan.dcm
+  002/scan.dcm
+  → Use directory number as subject ID.
+
+CRITICAL RULES FOR SUBJECT COUNTING:
+1. python_subject_analysis.subject_count is a HINT, not authoritative.
+2. user_hints.n_subjects is the AUTHORITATIVE count.
+   If provided, your assignment_rules MUST produce exactly that many subjects.
+3. Count the actual unique files/directories to determine the true number.
+4. For group/subject nested structures: count UNIQUE FILES, not directories.
+   (PD/ and control/ are 2 directories but may contain 40 subjects total)
+
+═══════════════════════════════════════════════════════════════════════
+GROUP METADATA
+═══════════════════════════════════════════════════════════════════════
+
+When the dataset has clinically meaningful groups (PD vs control,
+patient vs healthy, treated vs untreated):
+- Add a 'group' column to participant_metadata for EVERY subject.
+- Use the exact group label from the directory or filename.
+
+Example for PD dataset with 40 subjects:
+  participant_metadata:
+    '1':  {original_id: 'PD_01',      group: 'PD'}
+    '2':  {original_id: 'PD_02',      group: 'PD'}
+    ...
+    '21': {original_id: 'control_01', group: 'control'}
+    ...
+    '40': {original_id: 'control_20', group: 'control'}
+
+═══════════════════════════════════════════════════════════════════════
+ASSIGNMENT RULES
+═══════════════════════════════════════════════════════════════════════
+
+Each rule maps source files to one BIDS subject ID.
+
+CRITICAL: 'subject' field must be BARE ID — no 'sub-' prefix.
+  ✓ subject: '1'      → executor creates sub-1
+  ✗ subject: 'sub-1'  → executor creates sub-sub-1
+
+For group/subject nested structures, use the filename as the match token:
+  assignment_rules:
+    - subject: '1'
+      original: 'PD_01'
+      match: ['*PD_01*']
+    - subject: '21'
+      original: 'control_01'
+      match: ['*control_01*']
+
+For prefix-based flat structures:
+  assignment_rules:
+    - subject: '1'
+      original: 'VHM'
+      match: ['*VHM*']
+    - subject: '2'
+      original: 'VHF'
+      match: ['*VHF*']
 
 ═══════════════════════════════════════════════════════════════════════
 FORMAT_READY AND CONVERT_TO RULES
@@ -631,44 +703,49 @@ format_ready: false → needs conversion:
 convert_to: "none"   → only when format_ready: true
 
 ═══════════════════════════════════════════════════════════════════════
-SUBJECT ID STRATEGY
+FILENAME RULES — TASK INFERENCE
 ═══════════════════════════════════════════════════════════════════════
 
-CRITICAL: In assignment_rules, 'subject' must be the BARE ID without 'sub-' prefix.
+For fNIRS: infer task name from directory structure or user description.
+  walking/ directory → task-walking
+  fingertapping/ or tapping/ → task-fingertapping
+  resting/ or rest/ → task-rest
 
-✓ CORRECT:  subject: '1'      → executor creates sub-1
-✗ WRONG:    subject: 'sub-1'  → executor creates sub-sub-1
+For MRI: use acq- to distinguish different scan series from same subject.
+  VHFCT1mm-Ankle.dcm → acq-ankle_T1w
+  VHFCT1mm-Head.dcm  → acq-head_T1w
 
 ═══════════════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════
 
 subjects:
-  labels: [list of BIDS IDs without 'sub-' prefix]
+  labels: [list of bare BIDS IDs, e.g. ['1','2',...,'40']]
   count: N
   source: llm_analysis
-  id_strategy: numeric / semantic
+  id_strategy: numeric / semantic / already_bids
 
 assignment_rules:
-  - subject: 'bids_id'
-    original: 'token'
-    match: ['*token*']
+  - subject: 'bare_id'
+    original: 'exact_identifier_from_filename_or_dirname'
+    match: ['*identifier*']
 
 participant_metadata:
-  'bids_id':
+  'bare_id':
     original_id: 'xxx'
-    site: 'xxx'
-    sex: 'M'
+    group: 'PD'          # if applicable
+    sex: 'M'             # if available
+    age: '65'            # if available
 
 mappings:
-  - modality: mri
-    match: ['*.nii.gz', '**/*.dcm']
+  - modality: nirs
+    match: ['**/*.snirf']
     exclude: []
     format_ready: true
     convert_to: none
     filename_rules:
-      - match_pattern: '.*T1.*'
-        bids_template: 'sub-X_T1w.nii.gz'
+      - match_pattern: '.*'
+        bids_template: 'sub-X_task-walking_nirs.snirf'
 
 OUTPUT: Raw YAML only (no markdown, no explanation)
 """
