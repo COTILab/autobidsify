@@ -10,6 +10,8 @@ from collections import defaultdict
 from autobidsify.utils import write_json, read_json, write_yaml, info, warn, fatal
 from autobidsify.constants import SEVERITY_BLOCK
 from autobidsify.llm import llm_nirs_draft, llm_nirs_normalize, llm_bids_plan
+from autobidsify.llm import llm_map_mat_to_snirf
+from autobidsify.converters.nirs_convert import inspect_mat_structure, _structure_fingerprint
 
 HEADERS_DRAFT      = "nirs_headers_draft.json"
 HEADERS_NORMALIZED = "nirs_headers_normalized.json"
@@ -276,6 +278,150 @@ def _merge_participants_from_llm_metadata(
     info(f"  ✓ participants.tsv updated with {len(new_cols)} new column(s)")
 
 
+MAT_MAPPING_FILE = "mat_mapping.json"
+
+def _build_mat_mapping(
+    model: str,
+    all_files: List[str],
+    data_root: Path,
+    staging_dir: Path,
+) -> Optional[str]:
+    """
+    Generate mat_mapping.json for every .mat file in the dataset.
+
+    Strategy (minimise LLM calls):
+    1. Inspect all .mat files → structural summary per file.
+    2. Group files by structural fingerprint (same var names + shape patterns).
+    3. One LLM call per group → one mapping per group.
+    4. Copy group mapping to every file in that group.
+    5. Write mat_mapping.json with per-file entries.
+
+    Returns the relative path to mat_mapping.json ("_staging/mat_mapping.json"),
+    or None if no .mat files exist.
+    """
+    from autobidsify.llm import llm_map_mat_to_snirf
+    from autobidsify.converters.nirs_convert import inspect_mat_structure, _structure_fingerprint
+    import json as _json
+
+    mat_mapping_path = staging_dir / MAT_MAPPING_FILE
+
+    mat_files = [f for f in all_files if f.lower().endswith(".mat")]
+    if not mat_files:
+        return None  # no .mat files — skip silently
+
+    # Idempotent: skip if already generated
+    if mat_mapping_path.exists():
+        info("  mat_mapping.json already exists, skipping")
+        return f"_staging/{MAT_MAPPING_FILE}"
+
+    info(f"\nStep MAT: {len(mat_files)} .mat file(s) found — building mat_mapping.json")
+
+    # ── Step 1: inspect all files ────────────────────────────────────
+    file_summaries: Dict[str, Any] = {}   # relpath → summary
+    for relpath in mat_files:
+        abs_path = data_root / relpath
+        if not abs_path.exists():
+            warn(f"  .mat file not found: {relpath}")
+            continue
+        summary = inspect_mat_structure(abs_path)
+        if summary is None:
+            warn(f"  Cannot inspect: {relpath}")
+            continue
+        summary["relpath"] = relpath
+        file_summaries[relpath] = summary
+
+    if not file_summaries:
+        warn("  No .mat files could be inspected — mat_mapping.json not generated")
+        return None
+
+    info(f"  Inspected {len(file_summaries)}/{len(mat_files)} files")
+
+    # ── Step 2: group by structural fingerprint ───────────────────────
+    groups: Dict[frozenset, List[str]] = {}
+    for relpath, summary in file_summaries.items():
+        fp = _structure_fingerprint(summary)
+        groups.setdefault(fp, []).append(relpath)
+
+    info(f"  Found {len(groups)} structural group(s) → {len(groups)} LLM call(s)")
+
+    # ── Step 3: one LLM call per group ────────────────────────────────
+    per_file_mappings: Dict[str, Dict] = {}  # relpath → mapping dict
+
+    for group_idx, (fingerprint, group_relpaths) in enumerate(groups.items(), 1):
+        info(f"  Group {group_idx}/{len(groups)}: {len(group_relpaths)} file(s)")
+
+        # Use first file as representative
+        rep_relpath = group_relpaths[0]
+        rep_summary = file_summaries[rep_relpath]
+
+        payload = _json.dumps(
+            {
+                "group_size": len(group_relpaths),
+                "representative_file": rep_summary,
+            },
+            indent=2,
+        )
+
+        try:
+            response = llm_map_mat_to_snirf(model, payload)
+        except Exception as e:
+            warn(f"  LLM call failed for group {group_idx}: {e}")
+            # Leave files in this group without a mapping (heuristic fallback)
+            continue
+
+        # Parse response
+        text = response.strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+        if text.endswith("```"):
+            text = text[:-3]
+        try:
+            mapping = _json.loads(text.strip())
+        except Exception as e:
+            warn(f"  Cannot parse LLM JSON for group {group_idx}: {e}")
+            continue
+
+        da = mapping.get("data_assembly") or {}
+        info(f"    → data_assembly.type={da.get('type')}, "
+             f"data_assembly.var={da.get('var')}, "
+             f"confidence={mapping.get('confidence')}")
+
+        # Copy this mapping to every file in the group
+        for relpath in group_relpaths:
+            per_file_mappings[relpath] = {
+                # New assembly format (from updated prompt)
+                "data_assembly":        mapping.get("data_assembly"),
+                "time_assembly":        mapping.get("time_assembly"),
+                "wavelengths_assembly": mapping.get("wavelengths_assembly"),
+                # Legacy fields — kept for backward compatibility with old mat_mapping.json
+                "data_var":             mapping.get("data_var"),
+                "time_var":             mapping.get("time_var"),
+                "wavelengths_var":      mapping.get("wavelengths_var"),
+                # Common fields
+                "wavelengths_default":  mapping.get("wavelengths_default", [760, 850]),
+                "measlist_var":         mapping.get("measlist_var"),
+                "sampling_rate_hz":     mapping.get("sampling_rate_hz"),
+                "data_type_code":       mapping.get("data_type_code", 1),
+                "confidence":           mapping.get("confidence", "unknown"),
+                "notes":                mapping.get("notes", ""),
+            }
+
+    # ── Step 4: write mat_mapping.json ────────────────────────────────
+    mat_mapping_doc = {
+        "generated_by":   "autobidsify plan stage",
+        "model":          model,
+        "total_mat_files": len(mat_files),
+        "mapped_files":   len(per_file_mappings),
+        "structural_groups": len(groups),
+        "files":          per_file_mappings,
+    }
+    write_json(mat_mapping_path, mat_mapping_doc)
+    info(f"  ✓ mat_mapping.json: {len(per_file_mappings)} file(s) mapped, "
+         f"{len(groups)} LLM call(s)")
+
+    return f"_staging/{MAT_MAPPING_FILE}"
+
+
 # ============================================================================
 # Main entry point
 # ============================================================================
@@ -402,6 +548,30 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
     info("\nStep 6: Merging participant metadata...")
     if "participant_metadata" in plan_yaml:
         _merge_participants_from_llm_metadata(plan_yaml, out_dir)
+    
+    # ── Step MAT: mat_mapping.json (only when .mat files present) ─────
+    data_root_str = evidence_bundle.get("root", "")
+    mat_mapping_relpath = None
+    if data_root_str:
+        mat_mapping_relpath = _build_mat_mapping(
+            model=model,
+            all_files=all_files,
+            data_root=Path(data_root_str),
+            staging_dir=staging_dir,
+        )
+
+    # Inject mat_mapping_path into any nirs mapping entries that cover .mat files
+    if mat_mapping_relpath:
+        for m in plan_yaml.get("mappings", []):
+            if m.get("modality") == "nirs":
+                # Check if this mapping covers .mat files
+                patterns = m.get("match", [])
+                covers_mat = any(
+                    ".mat" in p.lower() or p == "**/*.mat"
+                    for p in patterns
+                )
+                if covers_mat or not patterns:  # no patterns = catches all nirs
+                    m["mat_mapping_path"] = mat_mapping_relpath
 
     # ── Step 7: Save plan ─────────────────────────────────────────────
     plan_yaml["metadata"] = {

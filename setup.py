@@ -62,6 +62,7 @@ setup(
         "dcm2niix>=1.0.20220720",
         "bids-validator>=1.14.0",
         "ollama>=0.6.0",
+        "snirf",
     ],
     
     extras_require={

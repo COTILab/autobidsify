@@ -750,6 +750,244 @@ mappings:
 OUTPUT: Raw YAML only (no markdown, no explanation)
 """
 
+# MAT → SNIRF semantic mapping
+
+PROMPT_MAT_SNIRF_MAPPING = """You are an fNIRS data format expert.
+
+You will receive a JSON summary of one or more MATLAB .mat files from the
+same structural group. The summary contains a "flat_vars" dict where all
+scipy struct wrappers have already been unwrapped — what you see reflects
+the actual data shape and content.
+
+flat_vars key conventions:
+- Top-level variable:     "d", "t", "fs"
+- Struct field:           "dat.signal", "SD.Lambda", "dat.fs"
+- "likely_data": true     marks tall 2D float arrays (n_samples > n_channels)
+- "value"                 means scalar
+- "values"                means small array with known content
+- "string_array" dtype    means channel labels or string metadata
+
+Use flat_vars keys EXACTLY as they appear. Do not invent new paths.
+
+═══════════════════════════════════════════════════════════
+SNIRF REQUIRED FIELDS
+═══════════════════════════════════════════════════════════
+
+dataTimeSeries  — 2D float (n_samples × n_channels)
+time            — 1D float (n_samples,), unit: seconds
+wavelengths     — 1D array of wavelength values in nm
+measurementList — per-channel source/detector/wavelength/dataType indices
+
+═══════════════════════════════════════════════════════════
+DATA ASSEMBLY TYPES
+═══════════════════════════════════════════════════════════
+
+Choose the correct type based on how the data is stored:
+
+TYPE 1 — "single": data is in one variable (most common)
+  Use when: one tall 2D array holds all channels
+  Example: Homer3 "d", or "dat.signal"
+  {
+    "type": "single",
+    "var": "d",
+    "transpose": false
+  }
+  Set transpose: true if shape is (n_channels, n_samples) instead of (n_samples, n_channels)
+  FORBIDDEN: Do NOT use array indexing syntax like "data.values[0]" or "data[0]".
+  The Python executor does not support cell array indexing.
+  Only dot-notation paths are supported: "data.X", "dat.signal", "SD.Lambda".
+
+  CRITICAL — struct variables: if the top-level variable is a MATLAB struct
+  (i.e. flat_vars shows sub-fields like "data.X", "data.fs", "data.trial"),
+  you MUST use the full dot-notation path to the numeric field, NOT the
+  struct variable name itself.
+
+  Example: flat_vars shows:
+    "data.X":     {"shape": [N, C], "likely_data": true}
+    "data.fs":    {"value": 10.0}
+    "data.trial": {"shape": [1, 75]}
+  Correct:   "var": "data.X"     ← full dot-notation path
+  WRONG:     "var": "data"       ← this is the struct, not the data array
+
+  Similarly for time:
+    "data.fs" is a scalar → use as fs_var in time_assembly
+    Correct: {"type": "generate", "fs_var": "data.fs"}
+
+TYPE 2 — "stack_columns": data split across ch1, ch2, ... chN variables
+  Use when: flat_vars contains many variables named ch1, ch2, ch3 ... chN
+  each being a 1D or column vector of the same length
+  {
+    "type": "stack_columns",
+    "var_pattern": "ch",
+    "var_range": [1, 40]
+  }
+  var_pattern: the common prefix (e.g. "ch", "channel", "nirs")
+  var_range: [first_index, last_index] inclusive
+  Use "vars" list instead of var_pattern+var_range if naming is non-numeric:
+  {
+    "type": "stack_columns",
+    "vars": ["left_pfc", "right_pfc", "motor"]
+  }
+
+TYPE 3 — "hbo_hbr": HbO and HbR stored as separate matrices
+  Use when: two 2D arrays named HbO/HbR or oxy/deoxy exist with same shape
+  {
+    "type": "hbo_hbr",
+    "hbo_var": "HbO",
+    "hbr_var": "HbR"
+  }
+  Result: columns are concatenated [HbO | HbR] → (n_samples, n_channels)
+
+═══════════════════════════════════════════════════════════
+TIME ASSEMBLY TYPES
+═══════════════════════════════════════════════════════════
+
+TYPE 1 — "var": time vector exists as a variable
+  {
+    "type": "var",
+    "var": "t"
+  }
+
+TYPE 2 — "generate": no time variable, generate from sampling rate
+  Prefer fs_var (read from file) over fs_value (hardcoded)
+  {
+    "type": "generate",
+    "fs_var": "dat.fs",
+    "fs_value": 13.33
+  }
+  If neither fs_var nor fs_value is known, set fs_value to null
+  (executor will default to 10.0 Hz)
+
+═══════════════════════════════════════════════════════════
+WAVELENGTHS ASSEMBLY TYPES
+═══════════════════════════════════════════════════════════
+
+TYPE 1 — "var": wavelengths stored in a variable
+  {
+    "type": "var",
+    "var": "SD.Lambda"
+  }
+
+TYPE 2 — "value": hardcode the values
+  Use when no wavelength variable found, or data is already concentration (HbO/HbR)
+  {
+    "type": "value",
+    "values": [760, 850]
+  }
+
+═══════════════════════════════════════════════════════════
+OTHER FIELDS
+═══════════════════════════════════════════════════════════
+
+measlist_var:
+  2D array shape (n_channels, 4), cols = [srcIdx, detIdx, aux, dataTypeCode]
+  Common: "SD.MeasList"
+  null if not found
+
+data_type_code:
+  1 = raw intensity (default)
+  2 = dOD (optical density change)
+  4 = HbO/HbR concentration
+  Set to 4 if data_assembly type is "hbo_hbr" or var names suggest concentration
+
+confidence: "high" | "medium" | "low"
+
+═══════════════════════════════════════════════════════════
+DECISION GUIDE
+═══════════════════════════════════════════════════════════
+
+Step 1 — Identify data_assembly type:
+  - Is there one tall 2D float array?        → "single"
+  - Are there many ch1...chN variables?      → "stack_columns"
+  - Are there HbO and HbR arrays?            → "hbo_hbr"
+
+Step 2 — Identify time_assembly type:
+  - Is there a 1D array matching n_samples?  → "var"
+  - Is there a scalar fs/Fs/srate?           → "generate" with fs_var
+  - Neither?                                 → "generate" with fs_value from notes or null
+
+Step 3 — Identify wavelengths_assembly type:
+  - Is there a small float array 600-1000?   → "var"
+  - No wavelength info found?                → "value" with [760, 850]
+
+Step 4 — Set data_type_code:
+  - Raw NIR intensity data                   → 1
+  - Optical density (log ratio)              → 2
+  - Hemoglobin concentration (HbO/HbR)       → 4
+
+═══════════════════════════════════════════════════════════
+OUTPUT FORMAT — JSON only, no markdown, no explanation
+═══════════════════════════════════════════════════════════
+
+{
+  "data_assembly": {
+    "type": "single",
+    "var": "d",
+    "transpose": false
+  },
+  "time_assembly": {
+    "type": "var",
+    "var": "t"
+  },
+  "wavelengths_assembly": {
+    "type": "var",
+    "var": "SD.Lambda"
+  },
+  "wavelengths_default": [760, 850],
+  "measlist_var": "SD.MeasList",
+  "data_type_code": 1,
+  "notes": "Homer3 format: standard d/t/SD structure detected",
+  "confidence": "high"
+}
+
+Additional examples:
+
+stack_columns case (ch1...ch40):
+{
+  "data_assembly": {
+    "type": "stack_columns",
+    "var_pattern": "ch",
+    "var_range": [1, 40]
+  },
+  "time_assembly": {
+    "type": "generate",
+    "fs_var": "nfo.fs",
+    "fs_value": 13.33
+  },
+  "wavelengths_assembly": {
+    "type": "value",
+    "values": [760, 850]
+  },
+  "wavelengths_default": [760, 850],
+  "measlist_var": null,
+  "data_type_code": 4,
+  "notes": "Data split across 40 channel variables ch1-ch40, concentration format",
+  "confidence": "medium"
+}
+
+hbo_hbr case:
+{
+  "data_assembly": {
+    "type": "hbo_hbr",
+    "hbo_var": "HbO",
+    "hbr_var": "HbR"
+  },
+  "time_assembly": {
+    "type": "var",
+    "var": "time"
+  },
+  "wavelengths_assembly": {
+    "type": "value",
+    "values": [760, 850]
+  },
+  "wavelengths_default": [760, 850],
+  "measlist_var": null,
+  "data_type_code": 4,
+  "notes": "HbO and HbR stored separately, will be concatenated column-wise",
+  "confidence": "high"
+}
+"""
+
 
 # ============================================================================
 # Public LLM call wrappers
@@ -774,6 +1012,16 @@ def llm_nirs_draft(model: str, payload: str) -> str:
 def llm_nirs_normalize(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_NIRS_NORMALIZE, payload,
                      "NIRS_Normalize", temperature=0.1)
+
+def llm_map_mat_to_snirf(model: str, payload: str) -> str:
+    """Ask LLM to map .mat variable structure to SNIRF fields."""
+    return _call_llm(
+        model,
+        PROMPT_MAT_SNIRF_MAPPING,
+        payload,
+        "MAT_SNIRF_Mapping",
+        temperature=0.05,
+    )
 
 def llm_mri_voxel_draft(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_MRI_VOXEL_DRAFT, payload,
