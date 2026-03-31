@@ -176,7 +176,7 @@ def convert_nirs_to_snirf(nirs_file: Path, output_path: Path,
             
             # /nirs/probe
             probe_grp = nirs_grp.create_group("probe")
-            pprobe_grp.create_dataset("wavelengths", data=np.array(wavelengths, dtype=np.float64))
+            probe_grp.create_dataset("wavelengths", data=np.array(wavelengths, dtype=np.float64))
             
             # Simplified probe geometry (2D positions)
             probe_grp.create_dataset("sourcePos2D", data=np.zeros((n_sources, 2)))
