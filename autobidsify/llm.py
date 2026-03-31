@@ -892,9 +892,38 @@ data_type_code:
 
 confidence: "high" | "medium" | "low"
 
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════
 DECISION GUIDE
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════
+
+Step 0 — Detect multi-block structure:
+  Use "top_level_shapes" (NOT flat_vars) to detect multi-block structures.
+  top_level_shapes shows the RAW shape of each variable BEFORE any unwrapping,
+  which is the only reliable way to see that e.g. "data" is a (1,4) cell array.
+
+  Detection rule — ALL three conditions must be true:
+    1. top_level_shapes[key].is_object == true
+    2. top_level_shapes[key].shape == [1, N] with N > 1
+    3. flat_vars contains sub-fields of that key (e.g. "data.X", "data.fs")
+       meaning each element of the cell array is a struct with data fields
+
+  If all three conditions are met:
+    → n_blocks = N  (the second dimension of the shape)
+    → block_data_field = the sub-field name holding the signal matrix
+      (look for the tall 2D array in flat_vars, e.g. "data.X" with likely_data=true)
+    → data_assembly.var = full dot-notation path to signal field in ONE block
+      (e.g. "data.X") — the executor iterates over blocks automatically
+
+  If the top-level variable is a plain 2D float matrix: n_blocks=1.
+  If uncertain: n_blocks=1  (safe default — no data is lost).
+
+  EXAMPLES:
+    top_level_shapes: {"data": {"shape": [1,4], "is_object": true, "is_struct": false}}
+    flat_vars has: "data.X" (likely_data=true), "data.fs" (scalar), "data.trial"
+    → n_blocks=4, block_data_field="X", data_assembly.var="data.X"
+
+    top_level_shapes: {"d": {"shape": [3000, 52], "is_object": false}}
+    → n_blocks=1, standard single-block processing
 
 Step 1 — Identify data_assembly type:
   - Is there one tall 2D float array?        → "single"
@@ -935,6 +964,8 @@ OUTPUT FORMAT — JSON only, no markdown, no explanation
   },
   "wavelengths_default": [760, 850],
   "measlist_var": "SD.MeasList",
+  "n_blocks": 1,
+  "block_data_field": null,
   "data_type_code": 1,
   "notes": "Homer3 format: standard d/t/SD structure detected",
   "confidence": "high"
@@ -960,6 +991,8 @@ stack_columns case (ch1...ch40):
   },
   "wavelengths_default": [760, 850],
   "measlist_var": null,
+  "n_blocks": 1,
+  "block_data_field": null,
   "data_type_code": 4,
   "notes": "Data split across 40 channel variables ch1-ch40, concentration format",
   "confidence": "medium"
@@ -982,6 +1015,8 @@ hbo_hbr case:
   },
   "wavelengths_default": [760, 850],
   "measlist_var": null,
+  "n_blocks": 1,
+  "block_data_field": null,
   "data_type_code": 4,
   "notes": "HbO and HbR stored separately, will be concatenated column-wise",
   "confidence": "high"

@@ -787,11 +787,25 @@ def inspect_mat_structure(mat_file: Path) -> Optional[Dict[str, Any]]:
     user_vars = {k: v for k, v in mat.items() if not k.startswith("__")}
     flat_vars = _flatten_mat_vars(user_vars)
 
+    # Record raw shape/dtype of each top-level variable BEFORE any unwrapping.
+    # This is the only reliable way for the LLM to detect multi-block structures
+    # (e.g. data is (1,4) object array of structs → n_blocks=4).
+    top_level_shapes = {}
+    for k, v in user_vars.items():
+        if hasattr(v, "shape"):
+            top_level_shapes[k] = {
+                "shape":     list(v.shape),
+                "dtype":     str(v.dtype),
+                "is_object": bool(v.dtype == object),
+                "is_struct": bool(v.dtype.names),
+            }
+
     return {
-        "filename":     mat_file.name,
-        "file_size_mb": round(mat_file.stat().st_size / 1e6, 2),
-        "flat_vars":    flat_vars,       # LLM sees this — fully unwrapped
-        "top_level_keys": list(user_vars.keys()),  # for reference
+        "filename":         mat_file.name,
+        "file_size_mb":     round(mat_file.stat().st_size / 1e6, 2),
+        "flat_vars":        flat_vars,
+        "top_level_keys":   list(user_vars.keys()),
+        "top_level_shapes": top_level_shapes,
     }
 
 
@@ -1179,6 +1193,7 @@ def _write_snirf_from_mat_mapping(
     output_path: Path,
     mapping: Dict[str, Any],
     quiet: bool = False,
+    block_index: Optional[int] = None,
 ) -> Optional[Path]:
     """
     Write SNIRF from .mat using pre-computed mapping from mat_mapping.json.
@@ -1198,6 +1213,34 @@ def _write_snirf_from_mat_mapping(
         return None
 
     user_vars = {k: v for k, v in mat.items() if not k.startswith("__")}
+
+    # ── block extraction (multi-block .mat) ───────────────────────────
+    # When block_index is set, the top-level variable is a (1,N) object
+    # array of structs. Extract the single block at block_index so that
+    # all downstream assembly logic sees a plain struct — exactly as if
+    # the file contained only one block.
+    if block_index is not None:
+        data_assembly = mapping.get("data_assembly") or {}
+        top_key = (data_assembly.get("var") or "").split(".")[0].split("[")[0]
+        if top_key and top_key in user_vars:
+            top_arr = user_vars[top_key]
+            if (hasattr(top_arr, "dtype") and top_arr.dtype == object
+                    and top_arr.size > 1):
+                try:
+                    block = top_arr.flat[block_index]
+                    if hasattr(block, "dtype"):
+                        user_vars = dict(user_vars)   # shallow copy, don't mutate original
+                        user_vars[top_key] = block
+                        if not quiet:
+                            info(f"  block_index={block_index}: "
+                                 f"extracted block from '{top_key}' "
+                                 f"(total {top_arr.size} blocks)")
+                except IndexError:
+                    if not quiet:
+                        warn(f"  block_index={block_index} out of range "
+                             f"(size={top_arr.size}), falling back to block 0")
+                    user_vars = dict(user_vars)
+                    user_vars[top_key] = top_arr.flat[0]
 
     # ── dataTimeSeries ─────────────────────────────────────────────────
     # Support new assembly format; fall back to legacy data_var string for
@@ -1359,6 +1402,7 @@ def convert_mat_to_snirf(
     output_path: Path,
     quiet: bool = False,
     _mat_mapping: Optional[Dict[str, Any]] = None,
+    _block_index: Optional[int] = None,
 ) -> Optional[Path]:
     """
     Convert MATLAB .mat file to SNIRF format.
@@ -1376,7 +1420,8 @@ def convert_mat_to_snirf(
         if not quiet:
             info(f"  Using mat_mapping entry for {mat_file.name}")
         result = _write_snirf_from_mat_mapping(
-            mat_file, output_path, _mat_mapping, quiet=quiet
+            mat_file, output_path, _mat_mapping, quiet=quiet,
+            block_index=_block_index,
         )
         if result:
             return result

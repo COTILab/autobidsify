@@ -220,6 +220,31 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
                 if not re.search(r"/ses-[A-Za-z0-9]+/", filepath):
                     raw = re.sub(r"ses-[A-Za-z0-9]+_?", "", raw).strip("_")
             if raw:
+                # Sanitize each entity value individually by splitting on '_'.
+                # This prevents the regex from eating the '_' between entities,
+                # e.g. "task-mental_arithmetic_nirs"
+                #   → ["task-mental_arithmetic", "nirs"]
+                #   → ["task-mentalarithmetic",  "nirs"]
+                #   → "task-mentalarithmetic_nirs"  ✓
+                def _sanitize_suffix(s: str) -> str:
+                    # Sanitize entity values in a BIDS suffix string.
+                    # An entity is "key-value" where key is letters only.
+                    # Value ends at the next "_key-" boundary or string end.
+                    # Non-entity trailing tokens (nirs, bold, T1w etc.) are
+                    # preserved as-is.
+                    #
+                    # Examples:
+                    #   "task-mental_arithmetic_nirs"  → "task-mentalarithmetic_nirs"
+                    #   "task-walking_nirs"             → "task-walking_nirs"
+                    #   "task-rest_run-1_bold"          → "task-rest_run-1_bold"
+                    #   "acq-highres_T1w"               → "acq-highres_T1w"
+                    return re.sub(
+                        r'([a-zA-Z]+-)(.+?)(?=_[a-zA-Z]+-|_[a-zA-Z]+$|$)',
+                        lambda m: m.group(1) + re.sub(r'[^a-zA-Z0-9]', '', m.group(2)),
+                        s
+                    )
+
+                raw = _sanitize_suffix(raw)
                 subdir = infer_subdirectory_from_suffix(raw)
                 return {"suffix": raw, "subdirectory": subdir,
                         "category": categorize_scan_type(raw)}
@@ -558,26 +583,91 @@ def execute_bids_plan(
                     ext = fp.suffix.lower()
 
                     if ext == ".mat":
-                        # Inject per-file mapping if available (from plan stage).
-                        # _mat_file_mappings keys are relative paths (same as fp_str).
                         _mapping = _mat_file_mappings.get(fp_str)
-                        result = convert_mat_to_snirf(
-                            fp, dst, quiet=False,
-                            _mat_mapping=_mapping,  # None → heuristic fallback
-                        )
+                        n_blocks = int((_mapping or {}).get("n_blocks", 1))
+
+                        # Validate actual block count directly from the file.
+                        # Files in the same structural group share one LLM mapping
+                        # but may have different block counts (e.g. S01 has 3 runs,
+                        # S08 has 4 runs). The file is the authoritative source.
+                        if n_blocks > 1:
+                            try:
+                                from scipy.io import loadmat as _loadmat
+                                _mat_check = _loadmat(str(fp), squeeze_me=False)
+                                _da = (_mapping or {}).get("data_assembly") or {}
+                                _top_key = (
+                                    (_da.get("var") or "").split(".")[0].split("[")[0]
+                                )
+                                if _top_key and _top_key in _mat_check:
+                                    _arr = _mat_check[_top_key]
+                                    if (hasattr(_arr, "dtype")
+                                            and _arr.dtype == object
+                                            and _arr.size > 1):
+                                        n_blocks = int(_arr.size)
+                            except Exception:
+                                pass  # keep mapping value on failure
+
+                        if n_blocks <= 1:
+                            # Single block — existing behaviour unchanged
+                            result = convert_mat_to_snirf(
+                                fp, dst, quiet=False,
+                                _mat_mapping=_mapping,
+                            )
+                            if result:
+                                converted_count += 1
+                                successes += 1
+                                processed_sources.add(fp_str)
+                            else:
+                                failures += 1
+
+                        else:
+                            # Multi-block: generate run-1 … run-N
+                            # Insert run-<N> before the final suffix token.
+                            # e.g. "sub-1_task-fingertapping_nirs.snirf"
+                            #   -> "sub-1_task-fingertapping_run-1_nirs.snirf"
+                            dst_name = dst.name
+                            # split off the last "_suffix.ext" part
+                            last_us = dst_name.rfind("_")
+                            dst_stem   = dst_name[:last_us]        # "sub-1_task-fingertapping"
+                            dst_suffix = dst_name[last_us + 1:]    # "nirs.snirf"
+
+                            block_success = 0
+                            for blk in range(n_blocks):
+                                run_label = blk + 1
+                                dst_block = dst.parent / \
+                                    f"{dst_stem}_run-{run_label}_{dst_suffix}"
+                                ensure_dir(dst_block.parent)
+                                result = convert_mat_to_snirf(
+                                    fp, dst_block, quiet=False,
+                                    _mat_mapping=_mapping,
+                                    _block_index=blk,
+                                )
+                                if result:
+                                    block_success += 1
+                                    info(f"      ✓ run-{run_label}: {dst_block.name}")
+                                else:
+                                    warn(f"      ✗ run-{run_label} failed")
+
+                            if block_success > 0:
+                                converted_count += block_success
+                                successes += block_success
+                                processed_sources.add(fp_str)
+                            else:
+                                failures += 1
+
                     elif ext == ".nirs":
                         result = convert_nirs_to_snirf(fp, dst, quiet=False)
+                        if result:
+                            converted_count += 1
+                            successes += 1
+                            processed_sources.add(fp_str)
+                        else:
+                            failures += 1
+
                     else:
                         warn(f"      ⚠ Unknown fNIRS format: {ext}")
                         failures += 1
-                        continue
 
-                    if result:
-                        converted_count += 1
-                        successes += 1
-                        processed_sources.add(fp_str)
-                    else:
-                        failures += 1
                 if converted_count:
                     info(f"    ✓ Converted {converted_count} fNIRS files to SNIRF")
                 else:

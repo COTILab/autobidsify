@@ -404,6 +404,9 @@ def _build_mat_mapping(
                 "data_type_code":       mapping.get("data_type_code", 1),
                 "confidence":           mapping.get("confidence", "unknown"),
                 "notes":                mapping.get("notes", ""),
+                # Multi-block support
+                "n_blocks":             int(mapping.get("n_blocks", 1)),
+                "block_data_field":     mapping.get("block_data_field", None),
             }
 
     # ── Step 4: write mat_mapping.json ────────────────────────────────
