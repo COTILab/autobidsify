@@ -20,6 +20,7 @@ Dependencies:
 
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import re
 import numpy as np
 import h5py
 import csv
@@ -418,70 +419,6 @@ def write_snirf_from_normalized(
             continue
     
     return snirf_files
-
-
-# ============================================================================
-# Sidecar generation
-# ============================================================================
-
-def write_nirs_sidecars(output_dir: Path, defaults: Dict[str, Any]) -> None:
-    """
-    Create BIDS sidecar files for all SNIRF files in directory.
-    
-    Creates for each .snirf file:
-        - *_nirs.json: Task metadata (required)
-        - *_channels.tsv: Channel descriptions (recommended)
-        - *_optodes.tsv: Optode positions (recommended)
-    
-    Args:
-        output_dir: Directory containing SNIRF files
-        defaults: Default metadata values (TaskName, SamplingFrequency, etc.)
-    """
-    snirf_files = list(Path(output_dir).rglob("*.snirf"))
-    
-    if not snirf_files:
-        return
-    
-    info(f"Generating sidecars for {len(snirf_files)} SNIRF files...")
-    
-    for snirf_file in snirf_files:
-        stem = snirf_file.stem
-        
-        # Remove _nirs suffix if already present (avoid duplication)
-        if stem.endswith('_nirs'):
-            stem = stem[:-5]
-        
-        # Create *_nirs.json (required BIDS sidecar)
-        json_path = snirf_file.parent / f"{stem}_nirs.json"
-        if not json_path.exists():
-            sidecar = {
-                "TaskName": defaults.get("TaskName", "rest"),
-                "SamplingFrequency": defaults.get("SamplingFrequency", 10.0),
-                "NIRSChannelCount": defaults.get("NIRSChannelCount", 0),
-                "NIRSSourceOptodeCount": defaults.get("NIRSSourceOptodeCount", 1),
-                "NIRSDetectorOptodeCount": defaults.get("NIRSDetectorOptodeCount", 1)
-            }
-            write_json(json_path, sidecar)
-            info(f"  ✓ {json_path.name}")
-        
-        # Create *_channels.tsv (recommended)
-        channels_path = snirf_file.parent / f"{stem}_channels.tsv"
-        if not channels_path.exists():
-            with open(channels_path, 'w') as f:
-                f.write("name\ttype\tsource\tdetector\twavelength_nominal\tunits\n")
-                # Placeholder - should be extracted from SNIRF file
-                f.write("ch1\tNIRS\t1\t1\t760\tnm\n")
-            info(f"  ✓ {channels_path.name}")
-        
-        # Create *_optodes.tsv (recommended)
-        optodes_path = snirf_file.parent / f"{stem}_optodes.tsv"
-        if not optodes_path.exists():
-            with open(optodes_path, 'w') as f:
-                f.write("name\ttype\tx\ty\tz\n")
-                # Placeholder positions
-                f.write("S1\tsource\t0\t0\t0\n")
-                f.write("D1\tdetector\t30\t0\t0\n")
-            info(f"  ✓ {optodes_path.name}")
 
 
 # ============================================================================
@@ -1372,8 +1309,12 @@ def _write_snirf_from_mat_mapping(
                 ch.create_dataset("detectorIndex",   data=int(row[1]))
                 ch.create_dataset("wavelengthIndex", data=wl_idx)
             else:
-                ch.create_dataset("sourceIndex",     data=(ch_idx // n_wl) + 1)
-                ch.create_dataset("detectorIndex",   data=(ch_idx % n_wl) + 1)
+                # Fallback when no MeasList is available.
+                # Each channel gets its own sequential index — this is the most
+                # conservative placeholder: avoids incorrect source/detector
+                # counts derived from wavelength arithmetic (e.g. ch//n_wl).
+                ch.create_dataset("sourceIndex",     data=ch_idx + 1)
+                ch.create_dataset("detectorIndex",   data=ch_idx + 1)
                 ch.create_dataset("wavelengthIndex", data=wl_idx)
             ch.create_dataset("dataType",      data=data_type_code)
             ch.create_dataset("dataTypeLabel", data=ch_label)
@@ -1552,3 +1493,455 @@ def convert_mat_to_snirf(
             import traceback
             traceback.print_exc()
         return None
+
+
+# ============================================================================
+# NIRS-BIDS sidecar generation
+# ============================================================================
+
+# Mapping from SNIRF dataTypeLabel to BIDS channel type string.
+# Reference: NIRS-BIDS spec, Table of channel types.
+_DTYPE_LABEL_TO_BIDS: Dict[str, str] = {
+    "Intensity": "NIRSCWAMPLITUDE",
+    "dOD":       "NIRSCWOPTICALDENSITY",
+    "HbO":       "NIRSCWHBO",
+    "HbR":       "NIRSCWHBR",
+    "HbT":       "MISC",      # no dedicated BIDS type for total-Hb
+    "Unknown":   "MISC",
+}
+
+# Mapping from BIDS channel type to measurement units.
+_BIDS_TYPE_TO_UNITS: Dict[str, str] = {
+    "NIRSCWAMPLITUDE":      "V",
+    "NIRSCWOPTICALDENSITY": "unitless",
+    "NIRSCWHBO":            "mM·mm",
+    "NIRSCWHBR":            "mM·mm",
+    "MISC":                 "n/a",
+}
+
+
+def _read_snirf_metadata(snirf_path: Path) -> Dict[str, Any]:
+    """
+    Read all metadata needed for sidecar generation from a SNIRF HDF5 file.
+
+    Opens the file once and returns a flat dict. Any field that cannot be
+    read is set to None — all callers must handle None gracefully.
+
+    Returned keys:
+      sampling_freq      : float or None
+      n_channels         : int or None
+      channels           : List[Dict] or None  — per-channel info
+      wavelengths        : List[float] or None
+      source_pos         : np.ndarray or None  — shape (n_src, 2or3)
+      detector_pos       : np.ndarray or None  — shape (n_det, 2or3)
+      source_pos_is_3d   : bool
+      detector_pos_is_3d : bool
+      n_sources          : int or None
+      n_detectors        : int or None
+    """
+    result: Dict[str, Any] = {
+        "sampling_freq":       None,
+        "n_channels":          None,
+        "channels":            None,
+        "wavelengths":         None,
+        "source_pos":          None,
+        "detector_pos":        None,
+        "source_pos_is_3d":    False,
+        "detector_pos_is_3d":  False,
+        "n_sources":           None,
+        "n_detectors":         None,
+    }
+
+    try:
+        with h5py.File(snirf_path, "r") as f:
+            nirs = f.get("nirs")
+            if nirs is None:
+                return result
+            data1 = nirs.get("data1")
+
+            # ── sampling frequency ─────────────────────────────────
+            if data1 is not None and "time" in data1:
+                try:
+                    t = data1["time"][()]
+                    if len(t) >= 2 and (t[-1] - t[0]) > 0:
+                        result["sampling_freq"] = round(
+                            (len(t) - 1) / float(t[-1] - t[0]), 4
+                        )
+                except Exception:
+                    pass
+
+            # ── channels from measurementList ──────────────────────
+            if data1 is not None:
+                ch_keys = sorted(
+                    [k for k in data1.keys() if k.startswith("measurementList")],
+                    key=lambda x: int(re.search(r"\d+", x).group())
+                    if re.search(r"\d+", x) else 0
+                )
+                result["n_channels"] = len(ch_keys)
+                channels = []
+                for ck in ch_keys:
+                    ch = data1[ck]
+                    def _read_scalar(group, key):
+                        try:
+                            v = group[key][()]
+                            return int(v) if np.issubdtype(
+                                np.array(v).dtype, np.integer) else float(v)
+                        except Exception:
+                            return None
+
+                    def _read_str(group, key):
+                        try:
+                            v = group[key][()]
+                            if isinstance(v, bytes):
+                                return v.decode("utf-8", errors="ignore").strip()
+                            return str(v).strip()
+                        except Exception:
+                            return None
+
+                    channels.append({
+                        "source_idx":    _read_scalar(ch, "sourceIndex"),
+                        "detector_idx":  _read_scalar(ch, "detectorIndex"),
+                        "wavelength_idx": _read_scalar(ch, "wavelengthIndex"),
+                        "data_type":     _read_scalar(ch, "dataType"),
+                        "data_type_label": _read_str(ch, "dataTypeLabel"),
+                    })
+                result["channels"] = channels
+
+            # ── wavelengths ────────────────────────────────────────
+            probe = nirs.get("probe")
+            if probe is not None and "wavelengths" in probe:
+                try:
+                    wl = probe["wavelengths"][()]
+                    result["wavelengths"] = [
+                        round(float(w), 1) for w in wl.flatten()
+                    ]
+                except Exception:
+                    pass
+
+            # ── optode positions ───────────────────────────────────
+            # Priority: 3D > 2D. All-zero arrays are treated as placeholders.
+            if probe is not None:
+                for pos_key, is_3d, src_or_det in [
+                    ("sourcePos3D",   True,  "source"),
+                    ("sourcePos2D",   False, "source"),
+                    ("detectorPos3D", True,  "detector"),
+                    ("detectorPos2D", False, "detector"),
+                ]:
+                    if pos_key not in probe:
+                        continue
+                    if result[f"{src_or_det}_pos"] is not None:
+                        continue   # already found a higher-priority entry
+                    try:
+                        arr = probe[pos_key][()]
+                        if arr.ndim == 2 and arr.shape[0] > 0:
+                            if not np.all(arr == 0):   # skip all-zero placeholders
+                                result[f"{src_or_det}_pos"] = arr
+                                result[f"{src_or_det}_pos_is_3d"] = is_3d
+
+                                n_key = "n_sources" if src_or_det == "source" \
+                                        else "n_detectors"
+                                result[n_key] = arr.shape[0]
+                    except Exception:
+                        pass
+
+            # ── fallback n_sources / n_detectors from measurementList ──
+            if result["channels"]:
+                if result["n_sources"] is None:
+                    src_indices = [
+                        c["source_idx"] for c in result["channels"]
+                        if c["source_idx"] is not None
+                    ]
+                    if src_indices:
+                        result["n_sources"] = max(src_indices)
+                if result["n_detectors"] is None:
+                    det_indices = [
+                        c["detector_idx"] for c in result["channels"]
+                        if c["detector_idx"] is not None
+                    ]
+                    if det_indices:
+                        result["n_detectors"] = max(det_indices)
+
+    except Exception as e:
+        warn(f"  _read_snirf_metadata failed for {snirf_path.name}: {e}")
+
+    return result
+
+
+def _generate_nirs_json(
+    snirf_path: Path,
+    bids_stem: str,
+    meta: Dict[str, Any],
+) -> None:
+    """
+    Generate *_nirs.json sidecar.
+
+    TaskName is extracted from the task- entity in bids_stem.
+    All numeric fields come from the shared metadata dict.
+    Defaults are used for any missing field; warnings are logged.
+    """
+    # Extract TaskName from BIDS stem (e.g. "sub-1_task-mentalarithmetic_run-1_nirs")
+    m = re.search(r"task-([A-Za-z0-9]+)", bids_stem)
+    if m:
+        task_name = m.group(1)
+    else:
+        task_name = "unknown"
+        warn(f"  _nirs.json: no task- entity in '{bids_stem}', "
+             f"using TaskName='unknown'")
+
+    fs = meta["sampling_freq"]
+    if fs is None:
+        fs = 10.0
+        warn(f"  _nirs.json: SamplingFrequency not found in SNIRF, "
+             f"using default 10.0 Hz")
+
+    n_ch = meta["n_channels"]
+    if n_ch is None:
+        n_ch = 0
+        warn(f"  _nirs.json: NIRSChannelCount not found, using 0")
+
+    n_src = meta["n_sources"]
+    if n_src is None:
+        n_src = 1
+        warn(f"  _nirs.json: NIRSSourceOptodeCount not found, using 1")
+
+    n_det = meta["n_detectors"]
+    if n_det is None:
+        n_det = 1
+        warn(f"  _nirs.json: NIRSDetectorOptodeCount not found, using 1")
+
+    sidecar = {
+        "TaskName":               task_name,
+        "SamplingFrequency":      fs,
+        "NIRSChannelCount":       n_ch,
+        "NIRSSourceOptodeCount":  n_src,
+        "NIRSDetectorOptodeCount": n_det,
+    }
+
+    out_path = snirf_path.parent / f"{bids_stem}_nirs.json"
+    write_json(out_path, sidecar)
+    info(f"  ✓ {out_path.name}")
+
+
+def _generate_channels_tsv(
+    snirf_path: Path,
+    bids_stem: str,
+    meta: Dict[str, Any],
+) -> None:
+    """
+    Generate *_channels.tsv sidecar.
+
+    One row per measurementList entry. Channel names follow the pattern
+    S{src}-D{det}; a wavelength suffix (_760 etc.) is appended when the
+    same source-detector pair appears at multiple wavelengths.
+    SNIRF dataTypeLabel is mapped to the BIDS channel type string.
+    """
+    channels  = meta["channels"]
+    wl_values = meta["wavelengths"] or []
+
+    if not channels:
+        warn(f"  _channels.tsv: no measurementList data found in "
+             f"{snirf_path.name}, skipping")
+        return
+
+    # Count (src, det) pair occurrences to decide whether to add wl suffix
+    from collections import Counter
+    pair_counts: Counter = Counter(
+        (c["source_idx"], c["detector_idx"]) for c in channels
+    )
+
+    rows: List[Dict] = []
+    for ch in channels:
+        src = ch["source_idx"]
+        det = ch["detector_idx"]
+        wl_idx = ch["wavelength_idx"]
+        label = ch["data_type_label"] or ""
+        dtype = ch["data_type"]
+
+        # Channel name
+        src_str = str(src) if src is not None else "?"
+        det_str = str(det) if det is not None else "?"
+        base_name = f"S{src_str}-D{det_str}"
+        if pair_counts.get((src, det), 0) > 1 and wl_idx is not None:
+            # Append wavelength value to disambiguate
+            if wl_idx - 1 < len(wl_values):
+                wl_val = int(round(wl_values[wl_idx - 1]))
+                ch_name = f"{base_name}_{wl_val}"
+            else:
+                ch_name = f"{base_name}_wl{wl_idx}"
+        else:
+            ch_name = base_name
+
+        # BIDS channel type
+        bids_type = _DTYPE_LABEL_TO_BIDS.get(label)
+        if bids_type is None:
+            # Fallback: infer from dataType integer code
+            if dtype == 1:
+                bids_type = "NIRSCWAMPLITUDE"
+            else:
+                bids_type = "MISC"
+                warn(f"  _channels.tsv: unknown dataTypeLabel '{label}' "
+                     f"for channel {ch_name}, using MISC")
+
+        # Wavelength nominal value
+        if wl_idx is not None and wl_idx - 1 < len(wl_values):
+            wl_nominal = int(round(wl_values[wl_idx - 1]))
+        else:
+            wl_nominal = "n/a"
+            if wl_idx is not None:
+                warn(f"  _channels.tsv: wavelengthIndex {wl_idx} out of range "
+                     f"for channel {ch_name}")
+
+        units = _BIDS_TYPE_TO_UNITS.get(bids_type, "n/a")
+
+        rows.append({
+            "name":               ch_name,
+            "type":               bids_type,
+            "source":             src_str,
+            "detector":           det_str,
+            "wavelength_nominal": wl_nominal,
+            "units":              units,
+        })
+
+    # channels.tsv is device-level (same across runs) — strip run- entity
+    # so all runs of the same subject/task share one file.
+    stem_no_run = re.sub(r"_run-[A-Za-z0-9]+", "", bids_stem)
+    out_path = snirf_path.parent / f"{stem_no_run}_channels.tsv"
+
+    # Skip if already written by an earlier run of the same subject/task
+    if out_path.exists():
+        info(f"  ✓ {out_path.name} (already exists, skipped)")
+        return
+
+    header = ["name", "type", "source", "detector",
+              "wavelength_nominal", "units"]
+    lines = ["\t".join(header)]
+    for row in rows:
+        lines.append("\t".join(str(row[h]) for h in header))
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    info(f"  ✓ {out_path.name} ({len(rows)} channels)")
+
+
+def _generate_optodes_tsv(
+    snirf_path: Path,
+    bids_stem: str,
+    meta: Dict[str, Any],
+) -> None:
+    """
+    Generate *_optodes.tsv sidecar.
+
+    Uses real 3D or 2D coordinates from the SNIRF probe group when available.
+    All-zero placeholder arrays are treated as missing (written as n/a).
+    Logs a warning when coordinates are unavailable.
+    """
+    src_pos    = meta["source_pos"]
+    det_pos    = meta["detector_pos"]
+    src_is_3d  = meta["source_pos_is_3d"]
+    det_is_3d  = meta["detector_pos_is_3d"]
+    n_sources  = meta["n_sources"]  or 1
+    n_detectors = meta["n_detectors"] or 1
+
+    has_real_coords = (src_pos is not None or det_pos is not None)
+    if not has_real_coords:
+        warn(f"  _optodes.tsv: no valid optode coordinates in "
+             f"{snirf_path.name} — writing n/a placeholder")
+
+    rows: List[Dict] = []
+
+    # Sources
+    for i in range(n_sources):
+        row: Dict[str, Any] = {"name": f"S{i+1}", "type": "source",
+                               "x": "n/a", "y": "n/a", "z": "n/a"}
+        if src_pos is not None and i < src_pos.shape[0]:
+            row["x"] = round(float(src_pos[i, 0]), 6)
+            row["y"] = round(float(src_pos[i, 1]), 6)
+            if src_is_3d and src_pos.shape[1] >= 3:
+                row["z"] = round(float(src_pos[i, 2]), 6)
+            else:
+                row["z"] = "n/a"   # 2D coordinate — z not available
+        rows.append(row)
+
+    # Detectors
+    for i in range(n_detectors):
+        row = {"name": f"D{i+1}", "type": "detector",
+               "x": "n/a", "y": "n/a", "z": "n/a"}
+        if det_pos is not None and i < det_pos.shape[0]:
+            row["x"] = round(float(det_pos[i, 0]), 6)
+            row["y"] = round(float(det_pos[i, 1]), 6)
+            if det_is_3d and det_pos.shape[1] >= 3:
+                row["z"] = round(float(det_pos[i, 2]), 6)
+            else:
+                row["z"] = "n/a"
+        rows.append(row)
+
+    # optodes.tsv is device-level (same across runs) — strip run- entity
+    # so all runs of the same subject/task share one file.
+    stem_no_run = re.sub(r"_run-[A-Za-z0-9]+", "", bids_stem)
+    out_path = snirf_path.parent / f"{stem_no_run}_optodes.tsv"
+
+    # Skip if already written by an earlier run of the same subject/task
+    if out_path.exists():
+        info(f"  ✓ {out_path.name} (already exists, skipped)")
+        return
+
+    header = ["name", "type", "x", "y", "z"]
+    lines = ["\t".join(header)]
+    for row in rows:
+        lines.append("\t".join(str(row[h]) for h in header))
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    info(f"  ✓ {out_path.name} ({len(rows)} optodes)")
+
+
+def _generate_coordsystem_json(
+    snirf_path: Path,
+    bids_stem: str,
+) -> None:
+    """
+    Generate *_coordsystem.json sidecar.
+
+    Required by BIDS whenever *_optodes.tsv exists.
+    Coordinate system is always 'unknown' because SNIRF does not store
+    the coordinate system name — it must be provided externally.
+    The file is named sub-XX_coordsystem.json (subject-level, not run-level).
+    """
+    m = re.search(r"(sub-[A-Za-z0-9]+)", bids_stem)
+    sub_label = m.group(1) if m else "sub-unknown"
+
+    out_path = snirf_path.parent / f"{sub_label}_coordsystem.json"
+
+    # Only write if not already written by a previous run of the same subject
+    if out_path.exists():
+        return
+
+    write_json(out_path, {
+        "NIRSCoordinateSystem":      "unknown",
+        "NIRSCoordinateSystemUnits": "mm",
+    })
+    info(f"  ✓ {out_path.name}")
+
+
+def generate_nirs_bids_sidecars(snirf_path: Path, bids_stem: str) -> None:
+    """
+    Generate all NIRS-BIDS sidecar files for a single SNIRF file.
+
+    Entry point called by executor immediately after each SNIRF file is
+    created or copied. Reads the SNIRF HDF5 once, then generates:
+      *_nirs.json        (REQUIRED)
+      *_channels.tsv     (REQUIRED)
+      *_optodes.tsv      (RECOMMENDED)
+      *_coordsystem.json (REQUIRED when optodes.tsv exists)
+
+    Args:
+        snirf_path: Absolute path to the .snirf file just created/copied.
+        bids_stem:  Filename without .snirf extension,
+                    e.g. "sub-1_task-mentalarithmetic_run-1_nirs"
+    """
+    try:
+        meta = _read_snirf_metadata(snirf_path)
+        _generate_nirs_json(snirf_path, bids_stem, meta)
+        _generate_channels_tsv(snirf_path, bids_stem, meta)
+        _generate_optodes_tsv(snirf_path, bids_stem, meta)
+        _generate_coordsystem_json(snirf_path, bids_stem)
+    except Exception as e:
+        warn(f"  generate_nirs_bids_sidecars failed for {snirf_path.name}: {e}")
+        import traceback
+        traceback.print_exc()

@@ -13,7 +13,7 @@ from autobidsify.converters.mri_convert import run_dcm2niix_batch, check_dcm2nii
 from autobidsify.converters.jnifti_converter import convert_jnifti_to_nifti, check_jnifti_support
 from autobidsify.converters.nirs_convert import (
     write_snirf_from_normalized,
-    write_nirs_sidecars,
+    generate_nirs_bids_sidecars,
     convert_mat_to_snirf,
     convert_nirs_to_snirf,
 )
@@ -553,11 +553,8 @@ def execute_bids_plan(
                     )
                     if snirf_files:
                         info(f"    ✓ Generated {len(snirf_files)} SNIRF files from CSV")
-                        write_nirs_sidecars(
-                            bids_root / "_temp_snirf",
-                            {"TaskName": plan.get("task_name", "task"),
-                             "SamplingFrequency": 10.0},
-                        )
+                        for _sf in snirf_files:
+                            generate_nirs_bids_sidecars(_sf, _sf.stem)
                         successes += len(snirf_files)
                     else:
                         warn("    ✗ CSV→SNIRF conversion produced no files")
@@ -617,6 +614,7 @@ def execute_bids_plan(
                                 converted_count += 1
                                 successes += 1
                                 processed_sources.add(fp_str)
+                                generate_nirs_bids_sidecars(result, result.stem)
                             else:
                                 failures += 1
 
@@ -645,6 +643,7 @@ def execute_bids_plan(
                                 if result:
                                     block_success += 1
                                     info(f"      ✓ run-{run_label}: {dst_block.name}")
+                                    generate_nirs_bids_sidecars(result, result.stem)
                                 else:
                                     warn(f"      ✗ run-{run_label} failed")
 
@@ -661,6 +660,7 @@ def execute_bids_plan(
                             converted_count += 1
                             successes += 1
                             processed_sources.add(fp_str)
+                            generate_nirs_bids_sidecars(result, result.stem)
                         else:
                             failures += 1
 
@@ -833,6 +833,7 @@ def execute_bids_plan(
                     copy_file(fp, dst)
                     successes += 1; done = True
                     processed_sources.add(fp_str)
+                    generate_nirs_bids_sidecars(dst, dst.stem)
 
                 # NIfTI — already BIDS-ready
                 # FIX: removed the undefined _write_nifti_sidecar_if_needed() call
