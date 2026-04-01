@@ -1322,8 +1322,21 @@ def _write_snirf_from_mat_mapping(
 
         probe = nirs_grp.create_group("probe")
         probe.create_dataset("wavelengths", data=np.array(wavelengths, dtype=np.float64))
-        n_src = max(int(np.max(measlist[:, 0])), 1) if measlist is not None else 1
-        n_det = max(int(np.max(measlist[:, 1])), 1) if measlist is not None else n_channels
+        if measlist is not None:
+            n_src = max(int(np.max(measlist[:, 0])), 1)
+            n_det = max(int(np.max(measlist[:, 1])), 1)
+        else:
+            # Try LLM-identified paths for source/detector counts
+            _n_src_raw = _extract_by_path(user_vars, mapping.get("n_sources_var"))
+            _n_det_raw = _extract_by_path(user_vars, mapping.get("n_detectors_var"))
+            try:
+                n_src = int(np.array(_n_src_raw).flat[0]) if _n_src_raw is not None else 1
+            except Exception:
+                n_src = 1
+            try:
+                n_det = int(np.array(_n_det_raw).flat[0]) if _n_det_raw is not None else n_channels
+            except Exception:
+                n_det = n_channels
         probe.create_dataset("sourcePos2D",   data=np.zeros((n_src, 2)))
         probe.create_dataset("detectorPos2D", data=np.zeros((n_det, 2)))
 
@@ -1634,13 +1647,12 @@ def _read_snirf_metadata(snirf_path: Path) -> Dict[str, Any]:
                     try:
                         arr = probe[pos_key][()]
                         if arr.ndim == 2 and arr.shape[0] > 0:
-                            if not np.all(arr == 0):   # skip all-zero placeholders
-                                result[f"{src_or_det}_pos"] = arr
-                                result[f"{src_or_det}_pos_is_3d"] = is_3d
+                            result[f"{src_or_det}_pos"] = arr
+                            result[f"{src_or_det}_pos_is_3d"] = is_3d
 
-                                n_key = "n_sources" if src_or_det == "source" \
-                                        else "n_detectors"
-                                result[n_key] = arr.shape[0]
+                            n_key = "n_sources" if src_or_det == "source" \
+                                    else "n_detectors"
+                            result[n_key] = arr.shape[0]
                     except Exception:
                         pass
 

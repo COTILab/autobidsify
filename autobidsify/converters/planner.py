@@ -407,6 +407,8 @@ def _build_mat_mapping(
                 # Multi-block support
                 "n_blocks":             int(mapping.get("n_blocks", 1)),
                 "block_data_field":     mapping.get("block_data_field", None),
+                "n_sources_var":        mapping.get("n_sources_var", None),
+                "n_detectors_var":      mapping.get("n_detectors_var", None),
             }
 
     # ── Step 4: write mat_mapping.json ────────────────────────────────

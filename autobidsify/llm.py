@@ -884,6 +884,24 @@ measlist_var:
   Common: "SD.MeasList"
   null if not found
 
+n_sources_var:
+  dot-notation path to a scalar variable whose value is the number of sources (optodes).
+  Look in flat_vars for a key whose:
+    - value is a small integer (typically 2–64)
+    - name semantically suggests source count: contains "nSrc", "nSource", "source",
+      "Src", "nS" or similar
+  Use the EXACT key as it appears in flat_vars. Do NOT invent paths.
+  null if no such variable found.
+
+n_detectors_var:
+  dot-notation path to a scalar variable whose value is the number of detectors (optodes).
+  Look in flat_vars for a key whose:
+    - value is a small integer (typically 2–64)
+    - name semantically suggests detector count: contains "nDet", "nDetector",
+      "detector", "Det", "nD" or similar
+  Use the EXACT key as it appears in flat_vars. Do NOT invent paths.
+  null if no such variable found.
+
 data_type_code:
   1 = raw intensity (default)
   2 = dOD (optical density change)
@@ -964,6 +982,8 @@ OUTPUT FORMAT — JSON only, no markdown, no explanation
   },
   "wavelengths_default": [760, 850],
   "measlist_var": "SD.MeasList",
+  "n_sources_var": null,
+  "n_detectors_var": null,
   "n_blocks": 1,
   "block_data_field": null,
   "data_type_code": 1,
@@ -991,6 +1011,8 @@ stack_columns case (ch1...ch40):
   },
   "wavelengths_default": [760, 850],
   "measlist_var": null,
+  "n_sources_var": null,
+  "n_detectors_var": null,
   "n_blocks": 1,
   "block_data_field": null,
   "data_type_code": 4,
@@ -1015,6 +1037,8 @@ hbo_hbr case:
   },
   "wavelengths_default": [760, 850],
   "measlist_var": null,
+  "n_sources_var": null,
+  "n_detectors_var": null,
   "n_blocks": 1,
   "block_data_field": null,
   "data_type_code": 4,
