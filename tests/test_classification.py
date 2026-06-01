@@ -58,7 +58,7 @@ class TestDetectExtension:
 
 class TestClassifyAndStage:
 
-    def _make_bundle(self, tmp_path: Path, files: list[str]) -> dict:
+    def _make_bundle(self, tmp_path: Path, files: list) -> dict:
         """Create a minimal evidence bundle with real placeholder files."""
         data_root = tmp_path / "data"
         data_root.mkdir()
