@@ -34,12 +34,14 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from autobidsify.utils import ensure_dir, write_json, copy_file, info, warn, fatal, read_json
-from autobidsify.constants import NIRS_POOL, MRI_POOL, UNKNOWN_POOL, STAGING_DIR
+from autobidsify.constants import NIRS_POOL, MRI_POOL, UNKNOWN_POOL, EEG_POOL, STAGING_DIR
 
 CLASSIFICATION_PLAN_FILENAME = "classification_plan.json"
 
 MRI_EXTS  = {'.dcm', '.nii', '.nii.gz', '.jnii', '.bnii'}
 NIRS_EXTS = {'.snirf', '.nirs', '.mat'}
+EEG_EXTS  = {'.edf', '.vhdr', '.set', '.bdf'}
+EEG_AUX_EXTS = {'.vmrk', '.eeg', '.fdt'}
 
 
 def _detect_extension(relpath: str) -> str:
@@ -96,6 +98,7 @@ def classify_and_stage(bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     # Classify by extension
     nirs_files:    List[str] = []
     mri_files:     List[str] = []
+    eeg_files:     List[str] = []
     unknown_files: List[str] = []
 
     for relpath in all_files:
@@ -104,6 +107,8 @@ def classify_and_stage(bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
             mri_files.append(relpath)
         elif ext in NIRS_EXTS:
             nirs_files.append(relpath)
+        elif ext in EEG_EXTS or ext in EEG_AUX_EXTS:
+            eeg_files.append(relpath)
         else:
             unknown_files.append(relpath)
 
@@ -111,11 +116,13 @@ def classify_and_stage(bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     plan: Dict[str, Any] = {
         "nirs_files":            nirs_files,
         "mri_files":             mri_files,
+        "eeg_files":             eeg_files,
         "unknown_files":         unknown_files,
         "classification_method": "extension_based",
         "classification_rules": [
             f"MRI extensions:   {sorted(MRI_EXTS)}",
             f"fNIRS extensions: {sorted(NIRS_EXTS)}",
+            f"EEG extensions:   {sorted(EEG_EXTS)}",
             ".mat is treated as fNIRS (Homer3/MATLAB convention); "
             "review manually if your .mat files are not fNIRS data.",
             "All other extensions go to the unknown pool by design "
@@ -124,6 +131,7 @@ def classify_and_stage(bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         "counts": {
             "mri_files":     len(mri_files),
             "nirs_files":    len(nirs_files),
+            "eeg_files":     len(eeg_files),
             "unknown_files": len(unknown_files),
             "all_files":     len(all_files),
         },
@@ -135,6 +143,7 @@ def classify_and_stage(bundle: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     info(f"✓ Classification plan saved: {plan_path}")
     info(f"  MRI files:     {len(mri_files)}")
     info(f"  fNIRS files:   {len(nirs_files)}")
+    info(f"  EEG files:     {len(eeg_files)}")
     info(f"  Unknown files: {len(unknown_files)} "
          f"(auxiliary/metadata files — expected)")
 
@@ -159,10 +168,12 @@ def _stage_files_to_pools(root: Path, plan: Dict[str, Any], out_dir: Path) -> No
     """
     nirs_pool    = Path(out_dir) / NIRS_POOL
     mri_pool     = Path(out_dir) / MRI_POOL
+    eeg_pool     = Path(out_dir) / EEG_POOL
     unknown_pool = Path(out_dir) / UNKNOWN_POOL
 
     ensure_dir(nirs_pool)
     ensure_dir(mri_pool)
+    ensure_dir(eeg_pool)
     ensure_dir(unknown_pool)
 
     def _copy_list(file_list: List[str], pool: Path, label: str) -> None:
@@ -193,6 +204,7 @@ def _stage_files_to_pools(root: Path, plan: Dict[str, Any], out_dir: Path) -> No
 
     _copy_list(plan.get("nirs_files",    []), nirs_pool,    "NIRS")
     _copy_list(plan.get("mri_files",     []), mri_pool,     "MRI")
+    _copy_list(plan.get("eeg_files",     []), eeg_pool,     "EEG")
     _copy_list(plan.get("unknown_files", []), unknown_pool, "UNKNOWN")
 
     unknown_count = len(plan.get("unknown_files", []))
@@ -227,5 +239,6 @@ def classify_files(output_dir: Path) -> None:
     info(f"\nClassification summary:")
     info(f"  MRI files:     {len(plan.get('mri_files',     []))}")
     info(f"  fNIRS files:   {len(plan.get('nirs_files',    []))}")
+    info(f"  EEG files:     {len(plan.get('eeg_files',     []))}")
     info(f"  Unknown files: {len(plan.get('unknown_files', []))} "
          f"(auxiliary files, expected)")

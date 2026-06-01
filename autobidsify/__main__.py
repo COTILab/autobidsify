@@ -58,8 +58,9 @@ def setup_parser():
             "autobidsify v0.9.2 — Automated BIDS Standardization Tool\n"
             "Powered by LLM-first architecture.\n"
             "\n"
-            "Supports MRI (.dcm, .nii, .nii.gz, .jnii, .bnii) and\n"
-            "fNIRS (.snirf, .nirs, .mat) datasets.\n"
+            "Supports MRI (.dcm, .nii, .nii.gz, .jnii, .bnii),\n"
+            "fNIRS (.snirf, .nirs, .mat), and\n"
+            "EEG (.edf, .vhdr, .set, .bdf) datasets.\n"
             "Output complies with BIDS specification v1.10.0.\n"
             "\n"
             "Website:  https://neurojson.org/Page/autobidsify\n"
@@ -178,7 +179,7 @@ Examples:
                              help='LLM model (default: gpt-4o). '
                                   'OpenAI: gpt-4o, gpt-4o-mini, gpt-5.1. '
                                   'Qwen: qwen3-coder-next:latest, qwen2.5-coder:7b')
-    full_parser.add_argument('--modality', choices=['mri', 'nirs', 'mixed'],
+    full_parser.add_argument('--modality', choices=['mri', 'nirs', 'eeg', 'mixed'],
                              help='Data modality: mri | nirs | mixed '
                                   '(auto-detected if omitted)')
     full_parser.add_argument('--nsubjects', type=int, default=None,
@@ -220,7 +221,7 @@ Examples:
                                  help='Output directory (must contain _staging/ingest_info.json)')
     evidence_parser.add_argument('--nsubjects', type=int, default=None,
                                  help='Number of subjects (auto-detected if omitted)')
-    evidence_parser.add_argument('--modality',  choices=['mri', 'nirs', 'mixed'],
+    evidence_parser.add_argument('--modality',  choices=['mri', 'nirs', 'eeg', 'mixed'],
                                  help='Data modality')
     evidence_parser.add_argument('--describe',  type=str,
                                  help='Dataset description')
@@ -346,10 +347,8 @@ def run_full_pipeline(args):
     all_warnings.extend(readme_result.get("warnings", []))
     all_warnings.extend(parts_result.get("warnings", []))
     
-    if all_warnings:
-        warn("\nWarnings:")
-        for w in all_warnings:
-            warn(f"  {w}")
+    for w in all_warnings:
+        warn(f"  {w}")
     
     # Stage 5: Plan
     info("\n[5/7] Generating BIDS plan...")

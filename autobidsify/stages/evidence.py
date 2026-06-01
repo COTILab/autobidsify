@@ -16,6 +16,16 @@ DOC_EXT     = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt"}
 MRI_EXT     = {".nii", ".dcm"}
 ARCHIVE_EXT = {".zip", ".tar", ".tar.gz", ".tgz"}
 NIRS_EXT    = {".snirf", ".nirs", ".mat"}
+EEG_EXT     = {".edf", ".vhdr", ".set", ".bdf"}
+EEG_AUX_EXT = {".vmrk", ".eeg", ".fdt"}
+EEG_EVENT_EXT = {".event", ".events", ".evt", ".mrk"}
+# Known electrode coordinate file extensions
+EEG_ELEC_EXT = {".elc", ".sfp", ".xyz", ".ced", ".loc", ".locs", ".elp"}
+# Keywords that suggest a file contains electrode/channel metadata
+EEG_AUX_KEYWORDS = {
+    "electrode", "channel", "montage", "layout", "position",
+    "location", "coord", "loc", "sensor", "cap"
+}
 ARRAY_EXT   = {".h5", ".hdf5", ".npy", ".npz"}
 TRIO_NAMES  = {"readme.md", "participants.tsv", "dataset_description.json"}
 JNIFTI_EXT  = {".jnii", ".bnii"}
@@ -379,6 +389,270 @@ def _extract_mat_nirs_header(path: Path) -> Optional[Dict[str, Any]]:
         return {"error": str(e)}
 
 
+def _extract_edf_header(path: Path) -> Optional[Dict[str, Any]]:
+    """
+    Extract metadata from EDF/EDF+ file without loading signal data.
+    Reads only the fixed 256-byte global header + per-channel signal headers.
+    No external library required — pure binary parsing.
+    """
+    try:
+        with open(path, 'rb') as f:
+            # Global header: 256 bytes
+            raw = f.read(256)
+            if len(raw) < 256:
+                return {"error": "file too short"}
+
+            version      = raw[0:8].decode('ascii', errors='ignore').strip()
+            local_patient = raw[8:88].decode('ascii', errors='ignore').strip()
+            local_record  = raw[88:168].decode('ascii', errors='ignore').strip()
+            startdate    = raw[168:176].decode('ascii', errors='ignore').strip()
+            starttime    = raw[176:184].decode('ascii', errors='ignore').strip()
+            n_bytes_hdr  = int(raw[184:192].decode('ascii', errors='ignore').strip() or 0)
+            reserved     = raw[192:236].decode('ascii', errors='ignore').strip()
+            n_records    = int(raw[236:244].decode('ascii', errors='ignore').strip() or 0)
+            duration     = float(raw[244:252].decode('ascii', errors='ignore').strip() or 0)
+            n_signals    = int(raw[252:256].decode('ascii', errors='ignore').strip() or 0)
+
+            # Per-channel signal headers
+            if n_signals <= 0 or n_signals > 512:
+                return {"error": f"invalid n_signals: {n_signals}"}
+
+            # Read channel labels (16 bytes each)
+            labels_raw = f.read(16 * n_signals)
+            channel_labels = [
+                labels_raw[i*16:(i+1)*16].decode('ascii', errors='ignore').strip()
+                for i in range(n_signals)
+            ]
+
+            # Skip transducer types, physical dim, physical/digital min/max (skip 80+8+8+8+8 bytes per channel)
+            f.read((80 + 8 + 8 + 8 + 8) * n_signals)
+
+            # Prefiltering (80 bytes each)
+            f.read(80 * n_signals)
+
+            # Number of samples per record (8 bytes each)
+            n_samples_raw = f.read(8 * n_signals)
+            samples_per_record = []
+            for i in range(n_signals):
+                try:
+                    spr = int(n_samples_raw[i*8:(i+1)*8].decode('ascii', errors='ignore').strip() or 0)
+                    samples_per_record.append(spr)
+                except Exception:
+                    samples_per_record.append(0)
+
+        # Compute sampling rates
+        sampling_rates = []
+        if duration > 0:
+            for spr in samples_per_record:
+                sampling_rates.append(round(spr / duration, 4) if spr > 0 else 0.0)
+
+        # Classify channels
+        eeg_ch, eog_ch, ecg_ch, misc_ch = [], [], [], []
+        for label in channel_labels:
+            lu = label.upper()
+            if any(x in lu for x in ['EOG', 'VEOG', 'HEOG']):
+                eog_ch.append(label)
+            elif any(x in lu for x in ['ECG', 'EKG', 'HEART']):
+                ecg_ch.append(label)
+            elif lu in ('STATUS', 'TRIGGER', 'STI', 'STIM', 'ANNOTATIONS'):
+                misc_ch.append(label)
+            else:
+                eeg_ch.append(label)
+
+        total_duration = round(n_records * duration, 3) if n_records > 0 and duration > 0 else None
+
+        result: Dict[str, Any] = {
+            "version":          version,
+            "n_signals":        n_signals,
+            "channel_labels":   channel_labels,
+            "eeg_channels":     eeg_ch,
+            "eog_channels":     eog_ch,
+            "ecg_channels":     ecg_ch,
+            "misc_channels":    misc_ch,
+            "n_eeg_channels":   len(eeg_ch),
+            "n_eog_channels":   len(eog_ch),
+            "n_ecg_channels":   len(ecg_ch),
+            "n_records":        n_records,
+            "record_duration_s": duration,
+            "total_duration_s": total_duration,
+            "sampling_rates":   sampling_rates,
+            "is_edf_plus":      "EDF+C" in reserved or "EDF+D" in reserved,
+        }
+
+        # Dominant sampling rate (most channels)
+        if sampling_rates:
+            from collections import Counter
+            most_common = Counter(sampling_rates).most_common(1)[0][0]
+            result["dominant_sampling_rate"] = most_common
+
+        return _make_json_serializable(result)
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _find_associated_event_files(edf_path: Path, data_root: Path) -> Optional[Dict[str, Any]]:
+    """
+    Find event files associated with an EDF file.
+
+    Search order (priority 1→5):
+      1. Same stem, EEG event extensions: .event .events .evt .mrk
+      2. Same stem, text extensions: .tsv .csv .txt
+      3. Same directory, filename contains 'event'/'marker'/'trigger'
+      4. EDF+ annotations (detected from header — no external file)
+      5. BrainVision .vmrk with same stem
+
+    Returns dict with 'path' (relative to data_root), 'raw_head' (first 20 lines),
+    and 'source_type'. Returns None if nothing found.
+    """
+    stem = edf_path.stem
+    parent = edf_path.parent
+
+    # Priority 1: same stem, event-specific extensions
+    for ext in ['.event', '.events', '.evt', '.mrk']:
+        candidate = parent / (stem + ext)
+        if candidate.exists():
+            try:
+                lines = candidate.read_text(encoding='utf-8', errors='ignore').splitlines()[:20]
+            except Exception:
+                lines = []
+            return {
+                "path": str(candidate.relative_to(data_root)),
+                "raw_head": lines,
+                "source_type": "external_event_file",
+                "extension": ext,
+            }
+
+    # Priority 2: same stem, text table extensions
+    for ext in ['.tsv', '.csv', '.txt']:
+        candidate = parent / (stem + ext)
+        if candidate.exists():
+            try:
+                lines = candidate.read_text(encoding='utf-8', errors='ignore').splitlines()[:20]
+            except Exception:
+                lines = []
+            return {
+                "path": str(candidate.relative_to(data_root)),
+                "raw_head": lines,
+                "source_type": "external_table_file",
+                "extension": ext,
+            }
+
+    # Priority 3: any file in same dir with event/marker/trigger in name
+    try:
+        for f in parent.iterdir():
+            if f.is_file() and f != edf_path:
+                name_lower = f.name.lower()
+                if any(kw in name_lower for kw in ['event', 'marker', 'trigger']):
+                    if f.suffix.lower() in ['.tsv', '.csv', '.txt', '.event', '.events', '.evt', '.mrk']:
+                        try:
+                            lines = f.read_text(encoding='utf-8', errors='ignore').splitlines()[:20]
+                        except Exception:
+                            lines = []
+                        return {
+                            "path": str(f.relative_to(data_root)),
+                            "raw_head": lines,
+                            "source_type": "shared_event_file",
+                            "extension": f.suffix.lower(),
+                        }
+    except Exception:
+        pass
+
+    # Priority 4: BrainVision .vmrk with same stem
+    vmrk = parent / (stem + '.vmrk')
+    if vmrk.exists():
+        try:
+            lines = vmrk.read_text(encoding='utf-8', errors='ignore').splitlines()[:20]
+        except Exception:
+            lines = []
+        return {
+            "path": str(vmrk.relative_to(data_root)),
+            "raw_head": lines,
+            "source_type": "brainvision_vmrk",
+            "extension": ".vmrk",
+        }
+
+    return None
+
+
+def _find_eeg_auxiliary_files(
+    data_root: Path,
+    all_files: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    Scan dataset for EEG auxiliary files that may contain electrode coordinates,
+    recording metadata, or participant info usable to enrich BIDS sidecars.
+
+    Detection is content-based and keyword-based — not filename-specific.
+    Works for any dataset regardless of naming convention.
+
+    Returns list of candidate files with raw_head and detected_content_type.
+    """
+    candidates = []
+    seen_paths = set()
+
+    for relpath in all_files:
+        p = data_root / relpath
+        if not p.is_file():
+            continue
+
+        ext = p.suffix.lower()
+        name_lower = p.name.lower()
+        stem_lower = p.stem.lower()
+
+        # Skip known primary data and BIDS sidecar files
+        if ext in EEG_EXT or ext in {".nii", ".nii.gz", ".dcm", ".snirf", ".nirs", ".mat"}:
+            continue
+        if ext in EEG_EVENT_EXT:
+            continue
+        if relpath in seen_paths:
+            continue
+
+        detected_type = None
+
+        # Known electrode coordinate formats — always collect
+        if ext in EEG_ELEC_EXT:
+            detected_type = "electrode_coordinates"
+
+        # Text/table files — check name keywords and content
+        elif ext in {".csv", ".tsv", ".txt", ".json"}:
+            # Name-based keyword detection
+            if any(kw in name_lower for kw in EEG_AUX_KEYWORDS):
+                detected_type = "electrode_or_channel_metadata"
+            else:
+                # Content-based: read first 20 lines and check for spatial/channel keywords
+                try:
+                    lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()[:20]
+                    combined = " ".join(lines).lower()
+                    if any(kw in combined for kw in
+                           ["electrode", "x\t", "y\t", "z\t", " x ", " y ", " z ",
+                            "impedance", "channel", "label", "theta", "phi",
+                            "age", "sex", "gender", "subject"]):
+                        detected_type = "possible_metadata"
+                except Exception:
+                    continue
+
+        if detected_type is None:
+            continue
+
+        try:
+            raw_lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
+        except Exception:
+            raw_lines = []
+
+        candidates.append({
+            "relpath":            relpath,
+            "filename":           p.name,
+            "extension":          ext,
+            "detected_type":      detected_type,
+            "raw_head":           raw_lines,
+            "size_bytes":         p.stat().st_size,
+        })
+        seen_paths.add(relpath)
+
+    return candidates
+
+
 # ============================================================================
 # Header extraction — MRI
 # ============================================================================
@@ -535,6 +809,10 @@ def detect_kind(p: Path) -> str:
         return "jnifti"
     if s in NIRS_EXT:
         return "nirs"
+    if s in EEG_EXT:
+        return "eeg"
+    if s in EEG_AUX_EXT or s in EEG_EVENT_EXT:
+        return "eeg_aux"
     if name.endswith(".nii.gz") or s in MRI_EXT:
         return "mri"
     if s in TABLE_EXT:
@@ -993,7 +1271,37 @@ def _build_evidence_bundle_internal(
             if hdr:
                 entry["header_info"] = hdr
 
+        elif kind == "jnifti":
+            hdr = _extract_jnifti_header(p)
+            if hdr:
+                entry["header_info"] = hdr
+
+        elif kind == "eeg":
+            if p.suffix.lower() == ".edf":
+                hdr = _extract_edf_header(p)
+                if hdr:
+                    entry["header_info"] = hdr
+                # Find associated event file
+                event_info = _find_associated_event_files(p, root)
+                if event_info:
+                    entry["associated_event_file"] = event_info
+                elif hdr and hdr.get("is_edf_plus"):
+                    entry["associated_event_file"] = {
+                        "source_type": "edf_plus_annotations",
+                        "path": None,
+                    }
+
         samples.append(entry)
+
+    # EEG auxiliary files scan (only when EEG files present)
+    eeg_aux_files: List[Dict[str, Any]] = []
+    has_eeg = any(
+        s.get("kind") == "eeg" for s in samples
+    )
+    if has_eeg:
+        eeg_aux_files = _find_eeg_auxiliary_files(root, all_file_paths)
+        if eeg_aux_files:
+            info(f"\n  Found {len(eeg_aux_files)} potential EEG auxiliary file(s)")
 
     # Participant metadata evidence
     info("\n=== Collecting Participant Metadata Evidence ===")
@@ -1071,7 +1379,9 @@ def _build_evidence_bundle_internal(
             "target_per_ext":           sample_per_ext,
             "total_patterns_detected":  sum(s["total_patterns"] for s in pattern_summary.values()),
             "pattern_summary":          pattern_summary
-        }
+        },
+
+        "eeg_auxiliary_files": eeg_aux_files
     }
 
     info(f"\nExtracted {len(documents)} documents")

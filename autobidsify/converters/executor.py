@@ -17,6 +17,7 @@ from autobidsify.converters.nirs_convert import (
     convert_mat_to_snirf,
     convert_nirs_to_snirf,
 )
+from autobidsify.converters.eeg_convert import generate_eeg_bids_sidecars
 
 
 def _sanitize_bids_label(label: str) -> str:
@@ -140,44 +141,75 @@ def _match_glob_pattern(filepath: str, pattern: str) -> bool:
     """
     Universal glob-style pattern matcher for relative file paths.
 
-    Supported patterns:
-        '**/*.nii.gz'   → any .nii.gz at any depth
-        '**/BRIK/**'    → any file inside a BRIK directory
-        '*token*'       → filepath contains token
-        '*.ext'         → filename ends with extension
-        'token*'        → filename starts with token
-        'plain'         → substring anywhere in path (fallback)
+    Implements full glob semantics using fnmatch:
+    - '**'          matches zero or more path components (any depth)
+    - '*'           matches anything within a single path component
+    - '?'           matches any single character
+    - '[seq]'       matches any character in seq
+
+    Examples:
+        '**/*.edf'          → any .edf at any depth, including root
+        '**/*_1.edf'        → any file ending in _1.edf at any depth
+        '*Subject*'         → filename contains Subject
+        'data/**/*.nii.gz'  → .nii.gz under data/ at any depth
+        '*.snirf'           → .snirf in root only
     """
-    fp  = filepath.lower()
-    pat = pattern.lower()
-    parts = fp.split("/")
+    import fnmatch
 
-    # **/TOKEN/** — directory component match
-    if pat.startswith("**/") and pat.endswith("/**"):
-        token = pat[3:-3]
-        return token in parts[:-1]
+    fp  = filepath.replace("\\", "/")
+    pat = pattern.replace("\\", "/")
 
-    # **/*.ext — any depth extension match
-    if pat.startswith("**/"):
-        suffix = pat[3:]
-        if suffix.startswith("*."):
-            return fp.endswith(suffix[1:])
-        return suffix in fp
+    # Normalise: collapse repeated slashes
+    while "//" in fp:
+        fp = fp.replace("//", "/")
+    while "//" in pat:
+        pat = pat.replace("//", "/")
 
-    # *token* — substring in full path
-    if pat.startswith("*") and pat.endswith("*"):
-        return pat.strip("*") in fp
+    # If no '**' in pattern, use plain fnmatch on the full path and filename
+    if "**" not in pat:
+        filename = fp.split("/")[-1]
+        # Try matching full path first, then filename only
+        return fnmatch.fnmatch(fp, pat) or fnmatch.fnmatch(filename, pat)
 
-    # *.ext — extension match on filename only
-    if pat.startswith("*."):
-        return parts[-1].endswith(pat[1:])
+    # Split pattern and path into parts for ** expansion
+    pat_parts = pat.split("/")
+    fp_parts  = fp.split("/")
 
-    # token* — filename prefix
-    if pat.endswith("*"):
-        return parts[-1].startswith(pat.rstrip("*"))
+    def _match_parts(pp: list, fp: list) -> bool:
+        """
+        Recursive matcher for path parts.
+        pp = remaining pattern parts
+        fp = remaining filepath parts
+        """
+        # Base cases
+        if not pp and not fp:
+            return True
+        if not pp:
+            return False
+        if pp == ["**"]:
+            # '**' at end matches everything remaining (including nothing)
+            return True
 
-    # fallback — substring anywhere
-    return pat in fp
+        head = pp[0]
+
+        if head == "**":
+            # '**' can match zero parts (skip it) or one or more parts
+            # Try matching zero parts: advance pattern only
+            if _match_parts(pp[1:], fp):
+                return True
+            # Try matching one or more parts: advance filepath
+            if fp and _match_parts(pp, fp[1:]):
+                return True
+            return False
+        else:
+            # Regular component: must match current filepath component
+            if not fp:
+                return False
+            if fnmatch.fnmatch(fp[0], head):
+                return _match_parts(pp[1:], fp[1:])
+            return False
+
+    return _match_parts(pat_parts, fp_parts)
 
 
 # ============================================================================
@@ -204,10 +236,16 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
     for rule in filename_rules:
         mp = rule.get("match_pattern", "").replace(r"\\", "\\")
         try:
-            if not re.search(mp, filename, re.IGNORECASE):
+            import fnmatch as _fnmatch
+            _glob_ok  = _fnmatch.fnmatch(filename.lower(), mp.lower())
+            try:
+                _regex_ok = bool(re.search(mp, filename, re.IGNORECASE))
+            except re.error:
+                _regex_ok = False
+            if not (_glob_ok or _regex_ok):
                 continue
             template = rule.get("bids_template", "")
-            m = re.search(r"sub-[^_]+_(.*?)\.(nii\.gz|snirf|nii)", template)
+            m = re.search(r"sub-[^_]+_(.+?)\.(nii\.gz|snirf|nii|edf|vhdr|set|bdf)$", template)
             if not m:
                 continue
             raw = m.group(1)
@@ -278,22 +316,23 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
             entities["task"] = "motor"
 
     if fname_low.endswith(".snirf") or "nirs" in fname_low:
-        modality_label, subdir = "nirs",          "nirs"
+        modality_label, subdir = "nirs", "nirs"
+    elif fname_low.endswith((".edf", ".vhdr", ".set", ".bdf")):
+        modality_label, subdir = "eeg",  "eeg"
     elif any(k in fname_low for k in ("t1w", "t1")):
-        modality_label, subdir = "T1w",           "anat"
+        modality_label, subdir = "T1w",  "anat"
     elif any(k in fname_low for k in ("t2w", "t2")):
-        modality_label, subdir = "T2w",           "anat"
+        modality_label, subdir = "T2w",  "anat"
     elif any(k in fname_low for k in ("bold", "func")):
-        modality_label, subdir = "bold",          "func"
+        modality_label, subdir = "bold", "func"
     elif "dwi" in fname_low:
-        modality_label, subdir = "dwi",           "dwi"
+        modality_label, subdir = "dwi",  "dwi"
     else:
-        modality_label, subdir = None,            "anat"
-    
+        modality_label, subdir = None,   "anat"
+
     # override subdir when task entity is present
-    # BIDS rule: any task-* scan belongs in func/ unless it is nirs.
-    # Also check the path itself for a func/ directory component.
-    if subdir != "nirs":
+    # BIDS rule: task-* goes to func/ for MRI, but NOT for nirs or eeg.
+    if subdir not in ("nirs", "eeg"):
         if "task" in entities or "func" in path_lower:
             subdir = "func"
             if not modality_label:
@@ -341,6 +380,8 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
         return {"suffix": "nirs", "subdirectory": "nirs", "category": "functional"}
     if fname_low.endswith((".nii", ".nii.gz")):
         return {"suffix": "T1w", "subdirectory": "anat", "category": "anatomical"}
+    if fname_low.endswith((".edf", ".vhdr", ".set", ".bdf")):
+        return {"suffix": "eeg", "subdirectory": "eeg", "category": "functional"}
 
     return {"suffix": "unknown", "subdirectory": "anat", "category": "unknown"}
 
@@ -351,6 +392,7 @@ def infer_subdirectory_from_suffix(suffix: str) -> str:
     if "t1w" in s or "t2w" in s:  return "anat"
     if "bold" in s:                return "func"
     if "nirs" in s:                return "nirs"
+    if "eeg"  in s:                return "eeg"
     if "dwi"  in s:                return "dwi"
     return "anat"
 
@@ -425,7 +467,14 @@ def analyze_filepath_universal(
         subject_id = subject_id[4:]
 
     scan_info = infer_scan_type_from_filepath(filepath, filename_rules)
-    ext       = ".snirf" if modality == "nirs" else ".nii.gz"
+    if modality == "nirs":
+        ext = ".snirf"
+    elif modality == "eeg":
+        # Preserve original EEG extension
+        orig_ext = "." + filepath.rsplit(".", 1)[-1] if "." in filepath else ""
+        ext = orig_ext if orig_ext in (".edf", ".vhdr", ".set", ".bdf") else ".edf"
+    else:
+        ext = ".nii.gz"
     
     clean_suffix = scan_info['suffix']  # already sanitized in infer_scan_type_from_filepath
     bids_filename = f"sub-{subject_id}_{clean_suffix}{ext}"
@@ -674,6 +723,8 @@ def execute_bids_plan(
                     warn("    ✗ No fNIRS files were converted")
             continue
 
+        info(f"    DEBUG filename_rules: {filename_rules}")
+
         # ── MRI / format-ready: analyze → group → convert / copy ──────
         file_analyses = [
             analyze_filepath_universal(f, assignment_rules, filename_rules,
@@ -834,6 +885,46 @@ def execute_bids_plan(
                     successes += 1; done = True
                     processed_sources.add(fp_str)
                     generate_nirs_bids_sidecars(dst, dst.stem)
+                
+                # EDF/BrainVision/EEGLAB — already BIDS-ready
+                elif file_ext in (".edf", ".vhdr", ".set", ".bdf") and modality == "eeg":
+                    info(f"      → Copying EEG: {fp.name}")
+                    copy_file(fp, dst)
+                    successes += 1; done = True
+                    processed_sources.add(fp_str)
+                    # Copy auxiliary files (.vmrk, .eeg, .fdt) with same stem
+                    for aux_ext in (".vmrk", ".eeg", ".fdt"):
+                        aux_src = fp.parent / (fp.stem + aux_ext)
+                        if aux_src.exists():
+                            aux_dst = dst.parent / (dst.stem + aux_ext)
+                            copy_file(aux_src, aux_dst)
+                            # Mark aux as processed so it doesn't go to derivatives
+                            rel = str(aux_src.relative_to(
+                                Path(planning_inputs.get("data_root", str(fp.parent)))
+                            )) if False else None
+                            try:
+                                processed_sources.add(str(aux_src.relative_to(input_root)))
+                            except ValueError:
+                                processed_sources.add(str(aux_src))
+                    # Load eeg_event_mapping if available
+                    _eeg_map_path = Path(output_dir) / "_staging" / "eeg_event_mapping.json"
+                    _eeg_mapping = None
+                    if _eeg_map_path.exists():
+                        try:
+                            _eeg_mapping = read_json(_eeg_map_path)
+                        except Exception:
+                            pass
+                    _eeg_aux_map_path = Path(output_dir) / "_staging" / "eeg_aux_mapping.json"
+                    _eeg_aux_mapping = None
+                    if _eeg_aux_map_path.exists():
+                        try:
+                            _eeg_aux_mapping = read_json(_eeg_aux_map_path)
+                        except Exception:
+                            pass
+                    generate_eeg_bids_sidecars(
+                        dst, dst.stem, _eeg_mapping,
+                        input_root, _eeg_aux_mapping
+                    )
 
                 # NIfTI — already BIDS-ready
                 # FIX: removed the undefined _write_nifti_sidecar_if_needed() call
@@ -908,12 +999,19 @@ def execute_bids_plan(
             nii   = len(list(sd.rglob("*.nii.gz")))
             snirf = len(list(sd.rglob("*.snirf")))
             total = nii + snirf
+            edf = len(list(sd.rglob("*.edf"))) + len(list(sd.rglob("*.vhdr"))) + \
+                  len(list(sd.rglob("*.set"))) + len(list(sd.rglob("*.bdf")))
+            total = nii + snirf + edf
             if nii and snirf:
                 info(f"  {sd.name}: {total} files ({nii} NIfTI, {snirf} SNIRF)")
+            elif nii and edf:
+                info(f"  {sd.name}: {total} files ({nii} NIfTI, {edf} EEG)")
             elif nii:
                 info(f"  {sd.name}: {nii} NIfTI file(s)")
             elif snirf:
                 info(f"  {sd.name}: {snirf} SNIRF file(s)")
+            elif edf:
+                info(f"  {sd.name}: {edf} EEG file(s)")
         if len(subject_dirs) > 15:
             info(f"  ... and {len(subject_dirs) - 15} more")
     else:

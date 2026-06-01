@@ -191,7 +191,7 @@ def _parse_llm_json_response(
     try:
         obj = json.loads(text)
         if DEBUG_MODE:
-            debug(f"{step_name}: ✓ JSON parsed successfully")
+            info(f"{step_name}: ✓ JSON parsed successfully")
         return obj
     except json.JSONDecodeError as e:
         if DEBUG_MODE:
@@ -345,7 +345,7 @@ def generate_dataset_description(model: str, bundle: Dict[str, Any], out_dir: Pa
     try:
         response_text = llm_trio_dataset_description(model, payload)
         if DEBUG_MODE:
-            debug(f"LLM response length: {len(response_text)} chars")
+            info(f"LLM response length: {len(response_text)} chars")
         result = _parse_llm_json_response(response_text, "dataset_description")
         if result:
             llm_dd = result.get("dataset_description", {})
@@ -356,8 +356,8 @@ def generate_dataset_description(model: str, bundle: Dict[str, Any], out_dir: Pa
                 llm_dd.get("License")      # fallback if LLM put it in License
             )
             if DEBUG_MODE:
-                debug(f"LLM returned fields: {list(llm_dd.keys())}")
-                debug(f"raw_license from LLM: {raw_license_from_llm!r}")
+                info(f"LLM returned fields: {list(llm_dd.keys())}")
+                info(f"raw_license from LLM: {raw_license_from_llm!r}")
     except Exception as e:
         warn(f"LLM call failed: {e}")
 

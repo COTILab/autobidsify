@@ -595,6 +595,15 @@ fNIRS FORMATS (modality: nirs):
   • Homer3 (.nirs)         → convert_to: snirf
   • MATLAB (.mat)          → convert_to: snirf
 
+EEG FORMATS (modality: eeg):
+  • EDF/EDF+ (.edf)        → format_ready: true  (copy directly)
+  • BrainVision (.vhdr)    → format_ready: true  (copy directly)
+  • EEGLAB (.set)          → format_ready: true  (copy directly)
+  • Biosemi (.bdf)         → format_ready: true  (copy directly)
+  CRITICAL: EEG files are NEVER converted. Always format_ready: true, convert_to: none.
+  CRITICAL: EEG bids_template MUST end with '_eeg.<original_ext>' (e.g. '_eeg.edf').
+            NEVER use NIfTI suffixes (T1w, T2w, bold) for EEG data.
+
 ═══════════════════════════════════════════════════════════════════════
 SUBJECT IDENTIFICATION — MOST IMPORTANT STEP
 ═══════════════════════════════════════════════════════════════════════
@@ -715,6 +724,23 @@ For MRI: use acq- to distinguish different scan series from same subject.
   VHFCT1mm-Ankle.dcm → acq-ankle_T1w
   VHFCT1mm-Head.dcm  → acq-head_T1w
 
+For EEG: infer task and run from filename suffixes or directory names.
+  RULE 1 — If each subject has multiple EEG files, each file is a separate scan.
+    Identify what differs between files of the same subject (suffix, keyword, directory).
+    Map each variant to a distinct task- or run- label from user description.
+    If task labels cannot be inferred, use run-1, run-2, run-N.
+  RULE 2 — Create one mapping entry per unique file variant across subjects.
+  RULE 3 — BIDS directory for EEG is always 'eeg/', never 'anat/' or 'nirs/'.
+  RULE 4 — BIDS filename suffix is always '_eeg' + original extension.
+
+EEG FILENAME EXAMPLES (CRITICAL — follow exactly):
+  ✓ sub-01_task-rest_eeg.edf
+  ✓ sub-01_task-arithmetic_eeg.edf
+  ✓ sub-01_run-1_eeg.edf
+  ✗ sub-01_T1w.nii.gz          ← NEVER for EEG
+  ✗ sub-01_unknown.nii.gz      ← NEVER for EEG
+  ✗ sub-01_bold.nii.gz         ← NEVER for EEG
+
 ═══════════════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════
@@ -746,6 +772,20 @@ mappings:
     filename_rules:
       - match_pattern: '.*'
         bids_template: 'sub-X_task-walking_nirs.snirf'
+
+  # EEG example — when each subject has ONE edf file:
+  - modality: eeg
+    match: ['**/*.edf']
+    exclude: []
+    format_ready: true
+    convert_to: none
+    filename_rules:
+      - match_pattern: '.*'
+        bids_template: 'sub-X_task-rest_eeg.edf'
+
+  # EEG example — when each subject has MULTIPLE edf files (different tasks/runs):
+  # Create one mapping entry per task/run, use match_pattern to distinguish them.
+  # The match_pattern must be derived from what actually differs in the filenames.
 
 OUTPUT: Raw YAML only (no markdown, no explanation)
 """
@@ -1047,6 +1087,106 @@ hbo_hbr case:
 }
 """
 
+PROMPT_EEG_EVENT_MAPPING = """You are an expert in EEG data formats and BIDS events.tsv specification.
+
+You will be given a sample of raw lines from an EEG event file (or BrainVision .vmrk file),
+along with the source type. Your job is to identify the column structure and output a
+standardized mapping so Python can read this file deterministically.
+
+TASK: Identify which columns map to:
+- onset: event start time
+- duration: event duration (may be absent → use "n/a")  
+- trial_type: event label/condition name
+
+Also identify:
+- header_row: true if the first non-comment line is a header
+- skip_rows: number of lines to skip before data starts (comment lines, blank lines)
+- separator: "tab", "comma", or "space"
+- onset_unit: "seconds", "milliseconds", or "samples"
+- duration_unit: "seconds", "milliseconds", or "samples" (or "n/a" if absent)
+
+For BrainVision .vmrk format:
+- Lines look like: Mk1=Stimulus,S  1,1000,1,0
+- onset is the 3rd comma-separated value (sample index, not seconds)
+- trial_type is the 2nd value (e.g. "S  1" → "S1")
+- onset_unit must be "samples"
+
+OUTPUT: JSON only, no markdown, no explanation.
+
+{
+  "onset_col": "time",
+  "duration_col": "duration",
+  "trial_type_col": "condition",
+  "header_row": true,
+  "skip_rows": 0,
+  "separator": "tab",
+  "onset_unit": "seconds",
+  "duration_unit": "seconds",
+  "source_type": "external_event_file",
+  "notes": "standard TSV with header"
+}
+
+If onset or trial_type cannot be identified, set them to null.
+If this is EDF+ annotations (source_type=edf_plus_annotations), return:
+{"source_type": "edf_plus_annotations", "notes": "read from EDF+ annotations directly"}
+"""
+
+
+PROMPT_EEG_AUX_MAPPING = """You are an EEG-BIDS expert analyzing auxiliary files from an EEG dataset.
+
+You will receive a list of candidate auxiliary files, each with its filename, extension,
+and the first 30 lines of content. Your job is to analyze each file and determine:
+
+1. What BIDS sidecar fields can be filled from this file?
+2. What is the primary content type?
+
+For each file output a JSON object. Combine all files into a single JSON array.
+
+CONTENT TYPES to detect:
+- "electrode_coordinates": file contains x/y/z or theta/phi positions per electrode/channel
+- "participant_demographics": file contains age, sex, group, or other per-subject info
+- "recording_metadata": file contains EEGReference, PowerLineFrequency, filter settings, amplifier info
+- "channel_labels": file maps channel numbers to names
+- "irrelevant": file is documentation, checksums, or unrelated metadata
+
+For electrode_coordinates files, also detect:
+- coordinate_system: "cartesian_3d", "cartesian_2d", "spherical", or "unknown"
+- has_impedance: true/false
+- column_order: list of column names in order (e.g. ["name","x","y","z"])
+
+For participant_demographics files, detect:
+- columns: list of column names found
+- subject_id_col: which column is the subject identifier
+
+For recording_metadata files, detect:
+- fields: dict mapping detected field → value or "present"
+
+OUTPUT: JSON array only, no markdown, no explanation.
+
+[
+  {
+    "relpath": "subject-info.csv",
+    "content_type": "participant_demographics",
+    "bids_targets": ["participants.tsv"],
+    "subject_id_col": "subject_id",
+    "columns": ["subject_id", "age", "sex", "group"],
+    "notes": "Contains age and sex for all subjects"
+  },
+  {
+    "relpath": "electrodes.loc",
+    "content_type": "electrode_coordinates",
+    "bids_targets": ["*_electrodes.tsv", "*_coordsystem.json"],
+    "coordinate_system": "cartesian_3d",
+    "has_impedance": false,
+    "column_order": ["name", "x", "y", "z"],
+    "notes": "Standard 10-20 positions"
+  }
+]
+
+If a file is irrelevant, still include it with content_type: "irrelevant".
+If content cannot be determined from the sample, use content_type: "unknown".
+"""
+
 
 # ============================================================================
 # Public LLM call wrappers
@@ -1089,6 +1229,26 @@ def llm_mri_voxel_draft(model: str, payload: str) -> str:
 def llm_mri_voxel_final(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_MRI_VOXEL_FINAL, payload,
                      "MRI_Voxel_Final", temperature=0.1)
+
+def llm_map_eeg_events(model: str, payload: str) -> str:
+    """Ask LLM to map EEG event file columns to BIDS events.tsv fields."""
+    return _call_llm(
+        model,
+        PROMPT_EEG_EVENT_MAPPING,
+        payload,
+        "EEG_Event_Mapping",
+        temperature=0.05,
+    )
+
+def llm_analyze_eeg_aux(model: str, payload: str) -> str:
+    """Ask LLM to analyze EEG auxiliary files and map them to BIDS targets."""
+    return _call_llm(
+        model,
+        PROMPT_EEG_AUX_MAPPING,
+        payload,
+        "EEG_Aux_Mapping",
+        temperature=0.05,
+    )
 
 def llm_bids_plan(model: str, payload: str) -> str:
     return _call_llm(model, PROMPT_BIDS_PLAN, payload,

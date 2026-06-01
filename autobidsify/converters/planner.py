@@ -10,7 +10,7 @@ from collections import defaultdict
 from autobidsify.utils import write_json, read_json, write_yaml, info, warn, fatal
 from autobidsify.constants import SEVERITY_BLOCK
 from autobidsify.llm import llm_nirs_draft, llm_nirs_normalize, llm_bids_plan
-from autobidsify.llm import llm_map_mat_to_snirf
+from autobidsify.llm import llm_map_mat_to_snirf, llm_map_eeg_events, llm_analyze_eeg_aux
 from autobidsify.converters.nirs_convert import inspect_mat_structure, _structure_fingerprint
 
 HEADERS_DRAFT      = "nirs_headers_draft.json"
@@ -21,6 +21,7 @@ BIDS_PLAN          = "BIDSPlan.yaml"
 _DATA_EXTS = {
     '.snirf', '.nirs', '.mat',
     '.dcm', '.nii', '.jnii', '.bnii', '.nii.gz',
+    '.edf', '.vhdr', '.set', '.bdf',
 }
 
 
@@ -427,6 +428,183 @@ def _build_mat_mapping(
     return f"_staging/{MAT_MAPPING_FILE}"
 
 
+EEG_EVENT_MAPPING_FILE = "eeg_event_mapping.json"
+
+def _build_eeg_event_mapping(
+    model: str,
+    all_files: List[str],
+    samples: List[Dict[str, Any]],
+    staging_dir: Path,
+) -> Optional[str]:
+    """
+    Generate eeg_event_mapping.json for EEG files that have associated event files.
+
+    Strategy:
+    1. Find all EEG files from samples that have associated_event_file info.
+    2. Group by source_type + raw_head fingerprint (same structure = same mapping).
+    3. One LLM call per group.
+    4. Write eeg_event_mapping.json with per-EEG-file entries.
+
+    Returns relative path to eeg_event_mapping.json, or None if no EEG event files found.
+    """
+    eeg_event_mapping_path = staging_dir / EEG_EVENT_MAPPING_FILE
+
+    # Already generated
+    if eeg_event_mapping_path.exists():
+        info("  eeg_event_mapping.json already exists, skipping")
+        return f"_staging/{EEG_EVENT_MAPPING_FILE}"
+
+    # Collect EEG samples with event file info
+    eeg_with_events = [
+        s for s in samples
+        if s.get("kind") == "eeg" and s.get("associated_event_file")
+    ]
+
+    if not eeg_with_events:
+        return None
+
+    info(f"\nStep EEG: {len(eeg_with_events)} EEG file(s) with event info — building eeg_event_mapping.json")
+
+    # Group by source_type + raw_head fingerprint
+    groups: Dict[str, List[Dict]] = {}
+    for sample in eeg_with_events:
+        ev = sample["associated_event_file"]
+        source_type = ev.get("source_type", "unknown")
+        raw_head = ev.get("raw_head", [])
+        fingerprint = source_type + "|" + "|".join(raw_head[:5])
+        groups.setdefault(fingerprint, []).append(sample)
+
+    info(f"  Found {len(groups)} event structure group(s) → {len(groups)} LLM call(s)")
+
+    per_file_mappings: Dict[str, Dict] = {}
+
+    for group_idx, (fingerprint, group_samples) in enumerate(groups.items(), 1):
+        rep = group_samples[0]
+        ev  = rep["associated_event_file"]
+
+        payload = json.dumps({
+            "source_type": ev.get("source_type"),
+            "extension":   ev.get("extension"),
+            "raw_head":    ev.get("raw_head", []),
+            "edf_file":    rep.get("relpath"),
+        }, indent=2)
+
+        try:
+            response = llm_map_eeg_events(model, payload)
+        except Exception as e:
+            warn(f"  LLM call failed for EEG event group {group_idx}: {e}")
+            continue
+
+        text = response.strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+        if text.endswith("```"):
+            text = text[:-3]
+        try:
+            mapping = json.loads(text.strip())
+        except Exception as e:
+            warn(f"  Cannot parse LLM JSON for EEG event group {group_idx}: {e}")
+            continue
+
+        info(f"    → onset_col={mapping.get('onset_col')}, "
+             f"trial_type_col={mapping.get('trial_type_col')}, "
+             f"onset_unit={mapping.get('onset_unit')}")
+
+        for sample in group_samples:
+            ev_info = sample["associated_event_file"]
+            per_file_mappings[sample["relpath"]] = {
+                "eeg_relpath":      sample["relpath"],
+                "event_file_path":  ev_info.get("path"),
+                "source_type":      ev_info.get("source_type"),
+                "onset_col":        mapping.get("onset_col"),
+                "duration_col":     mapping.get("duration_col"),
+                "trial_type_col":   mapping.get("trial_type_col"),
+                "header_row":       mapping.get("header_row", True),
+                "skip_rows":        mapping.get("skip_rows", 0),
+                "separator":        mapping.get("separator", "tab"),
+                "onset_unit":       mapping.get("onset_unit", "seconds"),
+                "duration_unit":    mapping.get("duration_unit", "seconds"),
+                "notes":            mapping.get("notes", ""),
+            }
+
+    if not per_file_mappings:
+        return None
+
+    eeg_event_doc = {
+        "generated_by": "autobidsify plan stage",
+        "model":        model,
+        "files":        per_file_mappings,
+    }
+    write_json(eeg_event_mapping_path, eeg_event_doc)
+    info(f"  ✓ eeg_event_mapping.json: {len(per_file_mappings)} file(s) mapped")
+    return f"_staging/{EEG_EVENT_MAPPING_FILE}"
+
+
+EEG_AUX_MAPPING_FILE = "eeg_aux_mapping.json"
+
+def _build_eeg_aux_mapping(
+    model: str,
+    eeg_aux_files: List[Dict[str, Any]],
+    staging_dir: Path,
+) -> Optional[str]:
+    """
+    Analyze EEG auxiliary files and map them to BIDS sidecar targets.
+    One LLM call for all files (send all raw_head samples together).
+    Returns path to eeg_aux_mapping.json or None if no aux files.
+    """
+    if not eeg_aux_files:
+        return None
+
+    eeg_aux_path = staging_dir / EEG_AUX_MAPPING_FILE
+    if eeg_aux_path.exists():
+        info("  eeg_aux_mapping.json already exists, skipping")
+        return f"_staging/{EEG_AUX_MAPPING_FILE}"
+
+    info(f"\nStep EEG-AUX: analyzing {len(eeg_aux_files)} auxiliary file(s)")
+
+    payload = json.dumps([
+        {
+            "relpath":       f["relpath"],
+            "filename":      f["filename"],
+            "extension":     f["extension"],
+            "detected_type": f["detected_type"],
+            "raw_head":      f["raw_head"],
+        }
+        for f in eeg_aux_files
+    ], indent=2)
+
+    try:
+        response = llm_analyze_eeg_aux(model, payload)
+    except Exception as e:
+        warn(f"  LLM call failed for EEG aux analysis: {e}")
+        return None
+
+    text = response.strip()
+    if text.startswith("```"):
+        text = "\n".join(text.split("\n")[1:])
+    if text.endswith("```"):
+        text = text[:-3]
+    try:
+        mapping_list = json.loads(text.strip())
+    except Exception as e:
+        warn(f"  Cannot parse LLM JSON for EEG aux mapping: {e}")
+        return None
+
+    # Index by relpath for easy lookup
+    mapping_doc = {
+        "generated_by": "autobidsify plan stage",
+        "model":        model,
+        "files":        {item["relpath"]: item for item in mapping_list
+                         if isinstance(item, dict) and "relpath" in item},
+    }
+    write_json(eeg_aux_path, mapping_doc)
+    n_useful = sum(1 for v in mapping_doc["files"].values()
+                   if v.get("content_type") not in ("irrelevant", "unknown"))
+    info(f"  ✓ eeg_aux_mapping.json: {len(mapping_doc['files'])} files analyzed, "
+         f"{n_useful} with usable content")
+    return f"_staging/{EEG_AUX_MAPPING_FILE}"
+
+
 # ============================================================================
 # Main entry point
 # ============================================================================
@@ -577,6 +755,33 @@ def build_bids_plan(model: str, planning_inputs: Dict[str, Any],
                 )
                 if covers_mat or not patterns:  # no patterns = catches all nirs
                     m["mat_mapping_path"] = mat_mapping_relpath
+    
+    # ── Step EEG: eeg_event_mapping.json (only when EEG files present) ─
+    samples = evidence_bundle.get("samples", [])
+    eeg_event_mapping_relpath = _build_eeg_event_mapping(
+        model=model,
+        all_files=all_files,
+        samples=samples,
+        staging_dir=staging_dir,
+    )
+
+    # Inject eeg_event_mapping_path into eeg mapping entries
+    if eeg_event_mapping_relpath:
+        for m in plan_yaml.get("mappings", []):
+            if m.get("modality") == "eeg":
+                m["eeg_event_mapping_path"] = eeg_event_mapping_relpath
+    
+    # ── Step EEG-AUX: eeg_aux_mapping.json ───────────────────────────
+    eeg_aux_files = evidence_bundle.get("eeg_auxiliary_files", [])
+    eeg_aux_mapping_relpath = _build_eeg_aux_mapping(
+        model=model,
+        eeg_aux_files=eeg_aux_files,
+        staging_dir=staging_dir,
+    )
+    if eeg_aux_mapping_relpath:
+        for m in plan_yaml.get("mappings", []):
+            if m.get("modality") == "eeg":
+                m["eeg_aux_mapping_path"] = eeg_aux_mapping_relpath
 
     # ── Step 7: Save plan ─────────────────────────────────────────────
     plan_yaml["metadata"] = {

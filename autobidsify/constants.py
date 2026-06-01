@@ -64,6 +64,9 @@ SEVERITY_BLOCK = "block"
 # CRITICAL: Strict separation - .mat ONLY for fNIRS
 MRI_EXTENSIONS = ['.nii', '.nii.gz', '.dcm', '.jnii', '.bnii']  # MRI only
 NIRS_EXTENSIONS = ['.snirf', '.nirs', '.mat']  # fNIRS only (includes .mat)
+EEG_EXTENSIONS = ['.edf', '.vhdr', '.set', '.bdf']
+# BrainVision/EEGLAB auxiliary files (accompany primary EEG files)
+EEG_AUX_EXTENSIONS = ['.vmrk', '.eeg', '.fdt']
 DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.txt', '.md', '.rst']
 
 # JNIfTI specific extensions (MRI subset)
@@ -73,6 +76,7 @@ JNIFTI_EXTENSIONS = ['.jnii', '.bnii']
 MODALITY_MRI = "mri"
 MODALITY_NIRS = "nirs"
 MODALITY_MIXED = "mixed"
+MODALITY_EEG = "eeg"
 
 # ==================== BIDS VERSIONS ====================
 BIDS_VERSION = "1.10.0"
@@ -86,6 +90,7 @@ CLASSIFICATION_PLAN = "classification_plan.json"
 
 NIRS_POOL = "_staging/nirs_pool"
 MRI_POOL = "_staging/mri_pool"
+EEG_POOL = "_staging/eeg_pool"
 UNKNOWN_POOL = "_staging/unknown"
 
 HEADERS_DRAFT = "nirs_headers_draft.json"
