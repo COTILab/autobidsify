@@ -81,7 +81,7 @@ autobidsify validate --output outputs/run
 ```
 --input PATH            Input data (archive or directory)
 --output PATH           Output directory
---model MODEL           LLM model (default: gpt-4o)
+--model MODEL           LLM model (default: gpt-4o, maximum context 128000 tokens)
 --modality TYPE         Data modality: mri | nirs | eeg | mixed
 --nsubjects N           Number of subjects (optional, auto-detected if omitted)
 --describe "TEXT"       Dataset description (recommended for metadata accuracy)
@@ -222,7 +222,7 @@ autobidsify full \
 
 ## Current Status
 
-**Version:** 0.9.5
+**Version:** 0.9.6
 
 ## Contributing
 

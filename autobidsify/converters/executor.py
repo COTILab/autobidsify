@@ -216,7 +216,7 @@ def _match_glob_pattern(filepath: str, pattern: str) -> bool:
 # Scan-type inference
 # ============================================================================
 
-def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> Dict[str, str]:
+def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict], modality: str = "mri") -> Dict[str, str]:
     """
     Infer BIDS scan-type suffix and subdirectory from a file path.
 
@@ -258,30 +258,100 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
                 if not re.search(r"/ses-[A-Za-z0-9]+/", filepath):
                     raw = re.sub(r"ses-[A-Za-z0-9]+_?", "", raw).strip("_")
             if raw:
-                # Sanitize each entity value individually by splitting on '_'.
-                # This prevents the regex from eating the '_' between entities,
-                # e.g. "task-mental_arithmetic_nirs"
-                #   → ["task-mental_arithmetic", "nirs"]
-                #   → ["task-mentalarithmetic",  "nirs"]
-                #   → "task-mentalarithmetic_nirs"  ✓
-                def _sanitize_suffix(s: str) -> str:
-                    # Sanitize entity values in a BIDS suffix string.
-                    # An entity is "key-value" where key is letters only.
-                    # Value ends at the next "_key-" boundary or string end.
-                    # Non-entity trailing tokens (nirs, bold, T1w etc.) are
-                    # preserved as-is.
-                    #
-                    # Examples:
-                    #   "task-mental_arithmetic_nirs"  → "task-mentalarithmetic_nirs"
-                    #   "task-walking_nirs"             → "task-walking_nirs"
-                    #   "task-rest_run-1_bold"          → "task-rest_run-1_bold"
-                    #   "acq-highres_T1w"               → "acq-highres_T1w"
-                    return re.sub(
-                        r'([a-zA-Z]+-)(.+?)(?=_[a-zA-Z]+-|_[a-zA-Z]+$|$)',
-                        lambda m: m.group(1) + re.sub(r'[^a-zA-Z0-9]', '', m.group(2)),
-                        s
-                    )
+                # Known BIDS suffix tokens and entity keys used to detect
+                # token boundaries when merging multi-word entity values.
+                _KNOWN_SUFFIXES = {
+                    "nirs", "bold", "eeg", "dwi", "T1w", "T2w", "T1rho",
+                    "T2star", "FLAIR", "FLASH", "PD", "PDT2", "angio",
+                    "inplaneT1", "inplaneT2", "phase", "magnitude",
+                }
+                _KNOWN_ENTITY_KEYS = {
+                    "ses", "task", "acq", "run", "dir", "echo",
+                    "part", "chunk", "res", "space", "split", "trc",
+                }
 
+                def _merge_entity_values(s: str) -> str:
+                    """
+                    Merge underscore-separated words that belong to the same
+                    entity value into a single alphanumeric token.
+
+                    BIDS entity values must be purely alphanumeric — no
+                    underscores or spaces are allowed inside them.
+
+                    Strategy: scan tokens left-to-right; when we are inside
+                    an entity (just saw "key-value"), keep absorbing following
+                    tokens into that entity's value until we hit a new entity
+                    (next token contains '-' with a known key) or a known
+                    BIDS suffix token.
+
+                    Examples:
+                      "task-mental_arithmetic_nirs"
+                        → tokens: ["task-mental", "arithmetic", "nirs"]
+                        → "arithmetic" is absorbed into task value
+                        → result: "task-mentalarithmetic_nirs"
+
+                      "task-rest_run-1_bold"
+                        → tokens: ["task-rest", "run-1", "bold"]
+                        → "run-1" starts a new entity → stop absorbing
+                        → result: "task-rest_run-1_bold"  (unchanged)
+
+                      "acq-cthead_T1w"
+                        → tokens: ["acq-cthead", "T1w"]
+                        → "T1w" is a known suffix → stop absorbing
+                        → result: "acq-cthead_T1w"  (unchanged)
+                    """
+                    tokens = s.split('_')
+                    result = []
+                    i = 0
+                    while i < len(tokens):
+                        tok = tokens[i]
+                        if '-' in tok:
+                            key, _, val = tok.partition('-')
+                            # Absorb following tokens that are neither a new
+                            # entity nor a known suffix.
+                            while i + 1 < len(tokens):
+                                nxt = tokens[i + 1]
+                                nxt_low = nxt.lower()
+                                # Stop if next token is a new entity key
+                                is_new_entity = (
+                                    '-' in nxt and
+                                    nxt.split('-', 1)[0].lower() in _KNOWN_ENTITY_KEYS
+                                )
+                                # Stop if next token is a known BIDS suffix
+                                is_suffix = (
+                                    nxt in _KNOWN_SUFFIXES or
+                                    nxt_low in {x.lower() for x in _KNOWN_SUFFIXES}
+                                )
+                                if is_new_entity or is_suffix:
+                                    break
+                                # Absorb: concatenate without separator
+                                val += nxt
+                                i += 1
+                            # Strip non-alphanumeric from the merged value
+                            val_clean = re.sub(r'[^a-zA-Z0-9]', '', val)
+                            result.append(f"{key}-{val_clean}")
+                        else:
+                            result.append(tok)
+                        i += 1
+                    return '_'.join(result)
+
+                def _sanitize_suffix(s: str) -> str:
+                    """
+                    Final sanitize pass: strip any remaining non-alphanumeric
+                    characters from entity values (e.g. spaces, dots, slashes).
+                    Non-entity tokens (T1w, bold, nirs…) are preserved as-is.
+                    """
+                    tokens = s.split('_')
+                    result = []
+                    for tok in tokens:
+                        if '-' in tok:
+                            key, _, val = tok.partition('-')
+                            result.append(f"{key}-{re.sub(r'[^a-zA-Z0-9]', '', val)}")
+                        else:
+                            result.append(tok)
+                    return '_'.join(result)
+
+                raw = _merge_entity_values(raw)
                 raw = _sanitize_suffix(raw)
                 subdir = infer_subdirectory_from_suffix(raw)
                 return {"suffix": raw, "subdirectory": subdir,
@@ -312,8 +382,19 @@ def infer_scan_type_from_filepath(filepath: str, filename_rules: List[Dict]) -> 
             entities["task"] = "fingertapping"
         elif "walking" in fname_no_ext or "walk" in fname_no_ext:
             entities["task"] = "walking"
-        elif any(kw in fname_no_ext for kw in ("motor", "tap")):
-            entities["task"] = "motor"
+        elif modality in ("nirs", "eeg"):
+            # task- is REQUIRED for nirs and eeg per BIDS spec.
+            # No keyword matched — use placeholder and warn.
+            entities["task"] = "unknown"
+            warn(f"  ⚠ Cannot infer task label for '{filepath}'. "
+                 f"Using task-unknown. Add task info to --describe to fix this.")
+        elif modality == "mri" and (fname_low.endswith((".nii", ".nii.gz")) and
+             any(k in fname_low for k in ("bold", "func"))):
+            # func MRI also requires task-
+            entities["task"] = "unknown"
+            warn(f"  ⚠ Cannot infer task label for func MRI '{filepath}'. "
+                 f"Using task-unknown.")
+        # anat (T1w, T2w) and dwi: task- is OPTIONAL — no fallback needed.
 
     if fname_low.endswith(".snirf") or "nirs" in fname_low:
         modality_label, subdir = "nirs", "nirs"
@@ -466,7 +547,7 @@ def analyze_filepath_universal(
     if subject_id.startswith("sub-"):
         subject_id = subject_id[4:]
 
-    scan_info = infer_scan_type_from_filepath(filepath, filename_rules)
+    scan_info = infer_scan_type_from_filepath(filepath, filename_rules, modality=modality)
     if modality == "nirs":
         ext = ".snirf"
     elif modality == "eeg":
