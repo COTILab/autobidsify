@@ -223,6 +223,8 @@ AutoBIDSify is under active development. Current work focuses on improving robus
 
 ## Desktop Application
 
+All releases: [https://github.com/yiyiliu-rose/autobidsifyAPP/releases](https://github.com/yiyiliu-rose/autobidsifyAPP/releases)
+
 A graphical desktop application is available for users who prefer not to use the command line.
 Two versions are provided:
 
@@ -244,13 +246,11 @@ Runs the full autobidsify pipeline from ingestion to validation.
 | macOS (Apple Silicon) | [AutoBIDSify-Full-macOS-arm64.zip](https://github.com/yiyiliu-rose/autobidsifyAPP/releases/download/latest-full/AutoBIDSify-Full-macOS-arm64.zip) |
 | Linux | [AutoBIDSify-Full-Linux.tar.gz](https://github.com/yiyiliu-rose/autobidsifyAPP/releases/download/latest-full/AutoBIDSify-Full-Linux.tar.gz) |
 
-All releases: [https://github.com/yiyiliu-rose/autobidsifyAPP/releases](https://github.com/yiyiliu-rose/autobidsifyAPP/releases)
-
 ## Contributing Test Datasets
 
 We welcome representative examples that can help improve AutoBIDSify across real-world dataset structures, metadata conventions, scanner/vendor differences, and modality-specific edge cases.
 
-Full DICOM image data is **not required** in most cases. We understand that sharing patient DICOM data is usually not feasible for many centers. The most practical and recommended contribution is a small, de-identified example that includes the raw organization, metadata, and expected BIDS-compatible output structure.
+Full DICOM image data is **not required** in most cases. We understand that sharing patient DICOM data is usually not feasible for many centers. The most practical and recommended contribution is a small, de-identified example that includes the raw organization, metadata, expected BIDS-compatible output structure, and any useful run feedback.
 
 A possible contribution format is:
 
@@ -262,14 +262,57 @@ example_dataset/
 │   ├── series_002.json       # Include fields such as ProtocolName, SeriesDescription, Modality, etc.
 │   └── ...
 ├── expected_bids_tree.txt    # Expected BIDS-compatible output directory structure
-└── notes.md                  # Mapping decisions, ambiguous cases, manual corrections, or other notes
+├── notes.md                  # Dataset description, mapping decisions, ambiguous cases, or manual corrections
+└── logs/                     # Optional but very useful
+    ├── run_log.txt           # AutoBIDSify run log, including LLM questions, errors, and warnings
+    ├── classification_plan.json
+    ├── BIDSPlan.yaml
+    └── conversion_log.json
 ```
 
 For EEG and fNIRS datasets, the same idea applies: a raw folder tree, representative de-identified metadata or header information, relevant auxiliary files if shareable, and an expected BIDS-compatible output tree are very helpful for testing and debugging.
 
 The expected BIDS structure does not need to be an official existing ground truth. Since many messy datasets do not already have ground-truth BIDS labels, it can be manually designed during testing or manually corrected after running AutoBIDSify.
 
-Please do not share identifiable or sensitive data. If you are unsure whether a dataset can be shared, please only provide de-identified metadata, a simplified folder tree, and a manually prepared expected BIDS tree.
+### Useful Feedback to Include
+
+In addition to the minimal dataset example, the following feedback is especially helpful and should not require much extra manual work.
+
+#### 1. AutoBIDSify's LLM questions
+
+When AutoBIDSify is not confident about how the input data should map to a BIDS label based on the available information, such as the protocol name, series description, folder name, or file header, it asks a clarification question instead of silently guessing.
+
+These questions mainly appear in two stages:
+
+* `classify`, when the modality or data type is ambiguous;
+* `plan`, when the BIDS entity mapping is uncertain while building the per-file conversion plan (`BIDSPlan`).
+
+The questions are printed in the run log and are also saved in the output of the corresponding stage. Sharing these questions helps us understand which cases are genuinely ambiguous and where the pipeline needs better rules or better LLM context.
+
+#### 2. Errors and warnings in the log
+
+If a conversion fails, the log should contain the related errors or warnings, such as DICOM-to-NIfTI conversion failures, unmatched BIDS entities, or duplicate/missing participant IDs.
+
+These messages are very useful because they often point directly to the messy real-world cases that AutoBIDSify is designed to handle, including varied acquisition protocols, inconsistent series names, missing metadata, and MR-tech naming habits.
+
+#### 3. A clear dataset description
+
+The dataset description is also important. AutoBIDSify uses the natural-language description to give the LLM context during the `classify` and `plan` stages.
+
+A short but clear description of the dataset can make the mapping more reliable and reduce ambiguous questions. Useful details include:
+
+* the modality or modalities included;
+* the acquisition context, such as task, resting state, anatomical scan, or calibration data;
+* known naming conventions;
+* expected subject/session/task labels, if known;
+* any files or series that should be ignored;
+* any manually corrected mappings.
+
+This description can be provided in `notes.md` or through the runtime `--describe` field.
+
+Together, the dataset example, LLM questions, logs, and description help us inspect failed or unclear cases directly and distinguish pipeline issues from missing-description issues.
+
+Please do not share identifiable or sensitive data. If you are unsure whether a dataset can be shared, please only provide de-identified metadata, a simplified folder tree, logs without sensitive paths, and a manually prepared expected BIDS tree.
 
 Please test AutoBIDSify and report issues at:
 https://github.com/cotilab/autobidsify/issues
