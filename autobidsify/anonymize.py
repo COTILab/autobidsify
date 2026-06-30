@@ -259,7 +259,8 @@ def _scrub_dicom_header_dict(header: Dict[str, Any],
 _REMOVE_KEYS = frozenset(HIPAA_DICOM_TAGS) | {"PatientName", "PatientID"}
 _DATE_KEYS = frozenset(HIPAA_DICOM_DATE_TAGS)
 _TEXT_KEYS = frozenset({"text", "summary", "user_text", "describe",
-                        "content", "parsed_text"})
+                        "content", "parsed_text", "document_text",
+                        "raw_text", "raw_head"})
 
 
 def _scrub_node(node: Any, site_registry: Dict[str, str]) -> None:
@@ -293,6 +294,14 @@ def _scrub_node(node: Any, site_registry: Dict[str, str]) -> None:
                 node[key] = _site_label(str(val), site_registry)
             elif key in _TEXT_KEYS and isinstance(val, str):
                 node[key] = scrub_text(val)
+            elif key in _TEXT_KEYS and isinstance(val, list):
+                # Text stored line-by-line, e.g. raw_head from EEG aux files.
+                node[key] = [scrub_text(x) if isinstance(x, str) else x
+                             for x in val]
+                # Still recurse for any non-string elements (e.g. nested dicts).
+                for x in val:
+                    if not isinstance(x, str):
+                        _scrub_node(x, site_registry)
             else:
                 _scrub_node(val, site_registry)
     elif isinstance(node, list):
@@ -506,6 +515,64 @@ def scrub_participants_tsv(tsv_path: Path) -> bool:
             return False
 
     return changed
+
+
+# ============================================================================
+# Unprocessed-file handling for public BIDS output (derivatives/)
+# ============================================================================
+
+# Extensions whose content can be reliably PHI-scrubbed as UTF-8 text.
+# Anything not listed here (PDF, DOCX, binary, raw imaging) cannot be
+# reliably scrubbed and must be kept out of the public BIDS output.
+_TEXT_SCRUBBABLE_EXTS = frozenset({
+    ".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".log", ".cfg",
+})
+
+
+def is_text_scrubbable(path: Path) -> bool:
+    """
+    Return True if the file's extension marks it as plain text that can be
+    reliably PHI-scrubbed line by line (dates/emails/phones via scrub_text).
+
+    Files that return False (PDF, DOCX, binary, raw DICOM, etc.) must not
+    be copied verbatim into the public BIDS output when anonymize=True,
+    because their PHI cannot be reliably removed.
+    """
+    name = path.name.lower()
+    if name.endswith(".nii.gz"):
+        return False
+    return path.suffix.lower() in _TEXT_SCRUBBABLE_EXTS
+
+
+def scrub_text_file(src: Path, dst: Path) -> bool:
+    """
+    Copy a plain-text file from src to dst with PHI scrubbed from its
+    contents (dates -> year, emails/phones redacted via scrub_text).
+
+    Only call on files for which is_text_scrubbable(src) is True. Returns
+    True on success; False if the file could not be read (in which case
+    nothing is written to dst, so no unscrubbed copy leaks out).
+
+    Note: scrub_text removes dates, emails, and phone numbers by regex.
+    It does NOT remove free-text personal names, which have no fixed
+    format; callers relying on full de-identification should be aware of
+    this limitation.
+    """
+    try:
+        text = src.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        warn(f"  Could not read {src.name} for scrubbing: {e}")
+        return False
+
+    scrubbed = scrub_text(text)
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(scrubbed, encoding="utf-8")
+        return True
+    except Exception as e:
+        warn(f"  Could not write scrubbed file {dst.name}: {e}")
+        return False
 
 
 # ============================================================================
