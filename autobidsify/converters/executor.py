@@ -18,7 +18,13 @@ from autobidsify.converters.nirs_convert import (
     convert_nirs_to_snirf,
 )
 from autobidsify.converters.eeg_convert import generate_eeg_bids_sidecars
-from autobidsify.anonymize import scrub_sidecar_json, scrub_participants_tsv, deface_nifti
+from autobidsify.anonymize import (
+    scrub_sidecar_json,
+    scrub_participants_tsv,
+    deface_nifti,
+    scrub_text_file,
+    is_text_scrubbable,
+)
 
 
 def _sanitize_bids_label(label: str) -> str:
@@ -1057,22 +1063,53 @@ def execute_bids_plan(
                 warn(f"      ✗ Failed: {e}")
                 failures += 1
 
-    # ── Step 3: copy unprocessed files to derivatives/ ────────────────
-    info("\n[3/5] Copying unprocessed files to derivatives/...")
+    # ── Step 3: handle unprocessed files ──────────────────────────────
     derivatives_root = bids_root / "derivatives"
     unprocessed = [f for f in all_files_str if f not in processed_sources]
-    info(f"  Total: {len(all_files_str)}, processed: {len(processed_sources)}, "
-         f"unprocessed: {len(unprocessed)}")
-    copied_deriv = 0
-    for fp_str in unprocessed:
-        src = path_str_to_path.get(fp_str)
-        if src and src.exists():
-            try:
-                copy_file(src, derivatives_root / fp_str)
-                copied_deriv += 1
-            except Exception as e:
-                warn(f"  Could not copy to derivatives: {fp_str}: {e}")
-    info(f"  ✓ Copied {copied_deriv} files to derivatives/")
+
+    if anonymize:
+        # In anonymize mode, raw auxiliary files must NOT be copied verbatim
+        # into the public BIDS output. Text files are scrubbed into
+        # derivatives/; everything else (PDF, DOCX, raw imaging, binary)
+        # is moved to _staging/sourcedata_private/, which is not part of
+        # the published BIDS dataset.
+        info("\n[3/5] Handling unprocessed files (anonymize=True)...")
+        private_root = Path(output_dir) / "_staging" / "sourcedata_private"
+        info(f"  Total: {len(all_files_str)}, processed: {len(processed_sources)}, "
+             f"unprocessed: {len(unprocessed)}")
+        scrubbed_deriv = 0
+        quarantined = 0
+        for fp_str in unprocessed:
+            src = path_str_to_path.get(fp_str)
+            if not (src and src.exists()):
+                continue
+            if is_text_scrubbable(src):
+                if scrub_text_file(src, derivatives_root / fp_str):
+                    scrubbed_deriv += 1
+            else:
+                try:
+                    copy_file(src, private_root / fp_str)
+                    quarantined += 1
+                except Exception as e:
+                    warn(f"  Could not move to sourcedata_private: {fp_str}: {e}")
+        info(f"  ✓ {scrubbed_deriv} text file(s) scrubbed into derivatives/")
+        info(f"  ✓ {quarantined} non-text file(s) kept out of public output "
+             f"(moved to _staging/sourcedata_private/)")
+    else:
+        info("\n[3/5] Copying unprocessed files to derivatives/...")
+        info(f"  Total: {len(all_files_str)}, processed: {len(processed_sources)}, "
+             f"unprocessed: {len(unprocessed)}")
+        copied_deriv = 0
+        for fp_str in unprocessed:
+            src = path_str_to_path.get(fp_str)
+            if src and src.exists():
+                try:
+                    copy_file(src, derivatives_root / fp_str)
+                    copied_deriv += 1
+                except Exception as e:
+                    warn(f"  Could not copy to derivatives: {fp_str}: {e}")
+        info(f"  ✓ Copied {copied_deriv} files to derivatives/")
+
     # Scrub participants.tsv if anonymize=True
     if anonymize:
         parts_path = bids_root / "participants.tsv"
